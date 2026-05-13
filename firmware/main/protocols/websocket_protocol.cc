@@ -441,6 +441,18 @@ bool WebsocketProtocol::OpenAudioChannelInternal(bool report_error) {
             SetError(Lang::Strings::SERVER_NOT_CONNECTED);
         }
     }
+
+    // The prologue at the top of this function set `intentional_close_`
+    // to true to suppress any stale reconnect job that might race with
+    // this open attempt. On the success paths the flag is cleared (in
+    // ParseServerHello() and in the post-wait block on the main task).
+    // On this failure path, however, none of those clears run, so the
+    // flag stays true — and `ScheduleReconnect()` early-returns when it
+    // sees it set, leaving the protocol stuck in "intentional close in
+    // progress" until something explicitly clears it. Clear it here so
+    // any subsequent reconnect attempt (timer-driven or otherwise) is
+    // actually permitted to fire.
+    intentional_close_.store(false);
     return false;
 }
 
