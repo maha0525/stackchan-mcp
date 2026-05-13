@@ -453,6 +453,23 @@ bool WebsocketProtocol::OpenAudioChannelInternal(bool report_error) {
     // any subsequent reconnect attempt (timer-driven or otherwise) is
     // actually permitted to fire.
     intentional_close_.store(false);
+
+    // Opt-in: persistent-connection mode. When the user has enabled
+    // "Keep WebSocket connection open at all times" in the WiFi config
+    // UI (NVS key websocket.persistent), schedule a reconnect attempt
+    // so the device keeps trying to reach the gateway after an
+    // initial-connect failure (gateway not yet up at boot, transient
+    // network issue, etc.). Without this opt-in, the original
+    // voice-session-driven ergonomics are preserved: a failed
+    // connect leaves control to the user, who can trigger another
+    // OpenAudioChannel() manually (button / wake word).
+    //
+    // The same NVS key gates `application.cc::ActivationTask`'s
+    // initial OpenAudioChannel() call at boot; the two work as a pair.
+    Settings websocket_settings("websocket", false);
+    if (websocket_settings.GetBool("persistent", false)) {
+        ScheduleReconnect();
+    }
     return false;
 }
 

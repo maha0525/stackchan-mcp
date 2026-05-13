@@ -344,6 +344,37 @@ void Application::ActivationTask() {
     // Initialize the protocol
     InitializeProtocol();
 
+    // Opt-in: persistent-connection mode. When the user has enabled the
+    // "Keep WebSocket connection open at all times" checkbox in the
+    // WiFi config UI (Advanced > websocket_persistent), open the audio
+    // channel right after activation so the device is reachable from
+    // the gateway from boot, not only after a user-driven voice
+    // session starts. This is what makes server-driven TTS push
+    // (e.g. an external producer sending {"type":"tts","state":"start"}
+    // + binary Opus frames, such as the SAIVerse persona_speak hook)
+    // work without requiring a physical button press first.
+    //
+    // OpenAudioChannel() returns false if the gateway is not yet
+    // reachable at boot time. That is non-fatal in persistent mode:
+    // the reconnect timer fires asynchronously (see the companion
+    // change in websocket_protocol.cc::OpenAudioChannelInternal which
+    // calls ScheduleReconnect() on failure when persistent mode is
+    // on, and the prior intentional_close_ bug-fix commit that lets
+    // the timer actually fire).
+    //
+    // Default (flag off): the original voice-session-driven ergonomics
+    // are preserved — the device stays disconnected until a user
+    // action triggers OpenAudioChannel(), and a connect failure
+    // returns control to the user instead of looping. Other users of
+    // the firmware see no behaviour change.
+    Settings websocket_settings("websocket", false);
+    if (websocket_settings.GetBool("persistent", false)) {
+        ESP_LOGI(TAG, "Persistent WebSocket mode enabled — opening audio channel at boot");
+        if (protocol_ != nullptr) {
+            protocol_->OpenAudioChannel();
+        }
+    }
+
     // Signal completion to main loop
     xEventGroupSetBits(event_group_, MAIN_EVENT_ACTIVATION_DONE);
 }
