@@ -324,14 +324,56 @@ void Application::ActivationTask() {
     // Create OTA object for activation process
     ota_ = std::make_unique<Ota>();
 
-    // Check for new assets version
+    // Check for new assets version (uses NVS only, does not contact any
+    // external server)
     CheckAssetsVersion();
 
-    // Check for new firmware version
-    CheckNewVersion();
+    // NOTE: The legacy xiaozhi-cloud OTA check is intentionally skipped.
+    // ota.cc::CheckVersion() has a side effect of overwriting the NVS
+    // "websocket" and "mqtt" namespaces with whatever the OTA response
+    // carries, which clobbers the gateway URL the user sets via the WiFi
+    // config UI (Advanced > WebSocket Gateway URL). The stackchan-mcp
+    // firmware always speaks to a custom gateway directly (see
+    // InitializeProtocol() below and websocket_protocol.cc), so the
+    // OTA-config payload is never consumed; skipping the call is the
+    // simplest way to keep the user-configured URL intact across reboots.
+    // current_version_ is populated in the Ota constructor from the
+    // ESP-IDF app description so GetCurrentVersion() still works for the
+    // UI notification path.
 
     // Initialize the protocol
     InitializeProtocol();
+
+    // Opt-in: persistent-connection mode. When the user has enabled the
+    // "Keep WebSocket connection open at all times" checkbox in the
+    // WiFi config UI (Advanced > websocket_persistent), open the audio
+    // channel right after activation so the device is reachable from
+    // the gateway from boot, not only after a user-driven voice
+    // session starts. This is what makes server-driven TTS push
+    // (e.g. an external producer sending {"type":"tts","state":"start"}
+    // + binary Opus frames, such as the SAIVerse persona_speak hook)
+    // work without requiring a physical button press first.
+    //
+    // OpenAudioChannel() returns false if the gateway is not yet
+    // reachable at boot time. That is non-fatal in persistent mode:
+    // the reconnect timer fires asynchronously (see the companion
+    // change in websocket_protocol.cc::OpenAudioChannelInternal which
+    // calls ScheduleReconnect() on failure when persistent mode is
+    // on, and the prior intentional_close_ bug-fix commit that lets
+    // the timer actually fire).
+    //
+    // Default (flag off): the original voice-session-driven ergonomics
+    // are preserved — the device stays disconnected until a user
+    // action triggers OpenAudioChannel(), and a connect failure
+    // returns control to the user instead of looping. Other users of
+    // the firmware see no behaviour change.
+    Settings websocket_settings("websocket", false);
+    if (websocket_settings.GetBool("persistent", false)) {
+        ESP_LOGI(TAG, "Persistent WebSocket mode enabled — opening audio channel at boot");
+        if (protocol_ != nullptr) {
+            protocol_->OpenAudioChannel();
+        }
+    }
 
     // Signal completion to main loop
     xEventGroupSetBits(event_group_, MAIN_EVENT_ACTIVATION_DONE);
