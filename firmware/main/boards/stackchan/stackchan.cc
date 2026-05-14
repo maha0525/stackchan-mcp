@@ -556,6 +556,30 @@ private:
     int current_mouth_index_ = 0;  // 0..4  (closed / half / open / e / u) — 0 is the resting state
     ActiveLayer active_layer_ = ActiveLayer::FACE;
 
+    // ---- Avatar fetch in-progress quiescence (intent doc invariant #6) ---
+    //
+    // Between the WS `avatar_set_fetch` notify and `avatar_set_loaded`
+    // reply, AvatarSet::Load briefly atomically swaps the PSRAM buffer
+    // backing every face/eyes/mouth lv_image_dsc_t. Any LVGL set_src write
+    // during that window can land on a dangling pointer, so we suppress
+    // writes for the whole fetch lifetime and remember the user's last
+    // expressed intent. When the fetch completes (success or failure) we
+    // apply the latest pending state — on success against the new set, on
+    // failure against the preserved old set.
+    //
+    // The flag is also the entry guard: a concurrent `avatar_set_fetch`
+    // gets rejected via avatar_set_loaded error="fetch_in_progress" rather
+    // than racing with the worker task already running.
+    std::atomic<bool> avatar_fetch_in_progress_{false};
+    SemaphoreHandle_t avatar_pending_lock_ = nullptr;
+    struct PendingAvatarState {
+        bool has_off = false;
+        bool has_face = false;     std::string face_name;
+        bool has_mouth = false;    std::string mouth_shape;
+        bool has_blink = false;    bool blink_enabled = false;
+    };
+    PendingAvatarState avatar_pending_;
+
     // Phase 2: blinking + lip-sync overlay state.
     // Blink works as a four-step state machine driven by blink_step_timer_:
     //   FACE -> EYES_HALF -> EYES_CLOSED -> EYES_HALF -> FACE (restore last face)
@@ -1620,6 +1644,115 @@ private:
         return true;
     }
 
+    // ---- Avatar fetch pending machinery (intent doc invariant #6) -------
+
+    // Lazily create avatar_pending_lock_. Safe to call repeatedly.
+    void EnsureAvatarPendingLock() {
+        if (avatar_pending_lock_ == nullptr) {
+            avatar_pending_lock_ = xSemaphoreCreateMutex();
+        }
+    }
+
+    // Record the request as pending if a fetch is currently in progress.
+    // Returns true when the request was captured (caller should NOT proceed
+    // with the live LVGL write); false when no fetch is active and the
+    // caller should run its normal path.
+    //
+    // Each helper writes the relevant subset of avatar_pending_ — a later
+    // call within the same fetch window wins (the user's most recent
+    // intent is what we apply when the fetch completes). set_avatar(face)
+    // and set_avatar("off") are mutually exclusive on the face axis, so
+    // they clear each other; mouth and blink axes are independent.
+    bool DeferAvatarFaceIfFetching(const char* face) {
+        if (!avatar_fetch_in_progress_.load(std::memory_order_acquire)) return false;
+        EnsureAvatarPendingLock();
+        if (avatar_pending_lock_ == nullptr) return false;
+        if (xSemaphoreTake(avatar_pending_lock_, portMAX_DELAY) == pdTRUE) {
+            avatar_pending_.has_off = false;
+            avatar_pending_.has_face = true;
+            avatar_pending_.face_name = (face != nullptr) ? face : "";
+            xSemaphoreGive(avatar_pending_lock_);
+        }
+        ESP_LOGI(TAG, "SetAvatarExpression('%s') deferred (avatar fetch in progress)",
+                 face != nullptr ? face : "(null)");
+        return true;
+    }
+
+    bool DeferAvatarOffIfFetching() {
+        if (!avatar_fetch_in_progress_.load(std::memory_order_acquire)) return false;
+        EnsureAvatarPendingLock();
+        if (avatar_pending_lock_ == nullptr) return false;
+        if (xSemaphoreTake(avatar_pending_lock_, portMAX_DELAY) == pdTRUE) {
+            avatar_pending_.has_face = false;
+            avatar_pending_.face_name.clear();
+            avatar_pending_.has_off = true;
+            xSemaphoreGive(avatar_pending_lock_);
+        }
+        ESP_LOGI(TAG, "SetAvatarOff deferred (avatar fetch in progress)");
+        return true;
+    }
+
+    bool DeferAvatarMouthIfFetching(const char* shape) {
+        if (!avatar_fetch_in_progress_.load(std::memory_order_acquire)) return false;
+        EnsureAvatarPendingLock();
+        if (avatar_pending_lock_ == nullptr) return false;
+        if (xSemaphoreTake(avatar_pending_lock_, portMAX_DELAY) == pdTRUE) {
+            avatar_pending_.has_mouth = true;
+            avatar_pending_.mouth_shape = (shape != nullptr) ? shape : "";
+            xSemaphoreGive(avatar_pending_lock_);
+        }
+        ESP_LOGI(TAG, "SetMouthShape('%s') deferred (avatar fetch in progress)",
+                 shape != nullptr ? shape : "(null)");
+        return true;
+    }
+
+    bool DeferAvatarBlinkIfFetching(bool enabled) {
+        if (!avatar_fetch_in_progress_.load(std::memory_order_acquire)) return false;
+        EnsureAvatarPendingLock();
+        if (avatar_pending_lock_ == nullptr) return false;
+        if (xSemaphoreTake(avatar_pending_lock_, portMAX_DELAY) == pdTRUE) {
+            avatar_pending_.has_blink = true;
+            avatar_pending_.blink_enabled = enabled;
+            xSemaphoreGive(avatar_pending_lock_);
+        }
+        ESP_LOGI(TAG, "set_blink(%d) deferred (avatar fetch in progress)", (int)enabled);
+        return true;
+    }
+
+    // Drain avatar_pending_ and apply it. Called from the avatar_fetch
+    // worker task after AvatarSet::Load returns (regardless of success);
+    // the caller must have already cleared avatar_fetch_in_progress_ so
+    // that the public SetAvatarExpression / SetMouthShape / set_blink
+    // paths invoked here run their live LVGL writes instead of looping
+    // back through the defer helpers.
+    void ApplyPendingAvatarAfterFetch() {
+        PendingAvatarState pending;
+        EnsureAvatarPendingLock();
+        if (avatar_pending_lock_ == nullptr) return;
+        if (xSemaphoreTake(avatar_pending_lock_, portMAX_DELAY) == pdTRUE) {
+            pending = avatar_pending_;
+            avatar_pending_ = PendingAvatarState{};
+            xSemaphoreGive(avatar_pending_lock_);
+        }
+        if (pending.has_off) {
+            SetAvatarOff();
+            return;
+        }
+        if (pending.has_face) {
+            SetAvatarExpression(pending.face_name.c_str());
+        }
+        if (pending.has_mouth) {
+            SetMouthShape(pending.mouth_shape.c_str());
+        }
+        if (pending.has_blink) {
+            if (pending.blink_enabled) {
+                StartBlinkTimer();
+            } else {
+                StopBlinkTimer();
+            }
+        }
+    }
+
     // Create avatar_img_ on the active LVGL screen, scaled to fill the LCD.
     // Caller must hold the LVGL/display lock. Returns true on success or
     // when avatar_img_ already exists.
@@ -1671,6 +1804,12 @@ private:
             ESP_LOGW(TAG, "SetAvatarExpression('%s') ignored: display_ not ready", face);
             return false;
         }
+        // Avatar set fetch in progress — record the request and return
+        // success. ApplyPendingAvatarAfterFetch() will replay the latest
+        // captured face when the fetch completes.
+        if (DeferAvatarFaceIfFetching(face)) {
+            return true;
+        }
         bool was_off = (current_avatar_face_ == "off");
         bool ok;
         {
@@ -1706,6 +1845,9 @@ private:
         if (display_ == nullptr) {
             ESP_LOGW(TAG, "SetAvatarOff() ignored: display_ not ready");
             return false;
+        }
+        if (DeferAvatarOffIfFetching()) {
+            return true;
         }
         // Capture the previous blink state only on the first transition
         // into "off". A repeated set_avatar("off") while already off must
@@ -1796,6 +1938,9 @@ private:
         }
         const int idx = MouthShapeToIndex(shape);
         if (idx < 0) return false;
+        if (DeferAvatarMouthIfFetching(shape)) {
+            return true;
+        }
         DisplayLockGuard lock(display_);
         current_mouth_index_ = idx;
         active_layer_ = ActiveLayer::MOUTH;
@@ -2768,9 +2913,17 @@ private:
             PropertyList({Property("enabled", kPropertyTypeBoolean)}),
             [this](const PropertyList& properties) -> ReturnValue {
                 bool enabled = properties["enabled"].value<bool>();
+                // blink_desired_ stays in sync with the user's intent
+                // regardless of which deferral path applies, so the
+                // mouth-sequence task and the avatar-fetch apply-pending
+                // path both see the latest value at their respective
+                // restore points.
                 blink_desired_.store(enabled, std::memory_order_release);
-                bool deferred = mouth_seq_active_.load(std::memory_order_acquire);
-                if (!deferred) {
+                bool deferred_by_fetch =
+                    DeferAvatarBlinkIfFetching(enabled);
+                bool deferred_by_mouth_seq =
+                    mouth_seq_active_.load(std::memory_order_acquire);
+                if (!deferred_by_fetch && !deferred_by_mouth_seq) {
                     if (enabled) {
                         StartBlinkTimer();
                     } else {
@@ -2780,11 +2933,15 @@ private:
                 cJSON* root = cJSON_CreateObject();
                 cJSON_AddBoolToObject(root, "enabled", enabled);
                 cJSON_AddBoolToObject(root, "ok", true);
-                if (deferred) {
+                if (deferred_by_fetch || deferred_by_mouth_seq) {
                     cJSON_AddBoolToObject(root, "deferred", true);
                 }
-                ESP_LOGI(TAG, "set_blink: enabled=%d deferred=%d",
-                         (int)enabled, deferred ? 1 : 0);
+                ESP_LOGI(TAG,
+                         "set_blink: enabled=%d deferred_by_fetch=%d "
+                         "deferred_by_mouth_seq=%d",
+                         (int)enabled,
+                         deferred_by_fetch ? 1 : 0,
+                         deferred_by_mouth_seq ? 1 : 0);
                 return root;
             });
 
@@ -3111,6 +3268,32 @@ public:
             return;
         }
 
+        // Take the in-progress guard. exchange(true) returns the previous
+        // value, so if another fetch was already running we reject this
+        // request rather than racing on avatar_set_'s PSRAM swap. The
+        // pending lock is created lazily (the defer helpers do the same;
+        // create it here so both producer and consumer share the same
+        // mutex instance).
+        if (avatar_fetch_in_progress_.exchange(true, std::memory_order_acq_rel)) {
+            ESP_LOGW(TAG, "OnAvatarSetFetch: another fetch already in progress");
+            SendAvatarSetLoadedError("", "fetch_in_progress");
+            return;
+        }
+        EnsureAvatarPendingLock();
+        if (avatar_pending_lock_ != nullptr &&
+            xSemaphoreTake(avatar_pending_lock_, portMAX_DELAY) == pdTRUE) {
+            avatar_pending_ = PendingAvatarState{};
+            xSemaphoreGive(avatar_pending_lock_);
+        }
+        // Quiesce every autonomous LVGL writer so no set_src lands while
+        // AvatarSet::Load atomically swaps the PSRAM buffer backing each
+        // lv_image_dsc_t. The schedule timers / state machines restart
+        // from ApplyPendingAvatarAfterFetch (blink) or the next tts.start
+        // (TTS lipsync) once the fetch resolves.
+        StopTtsLipSync();
+        RequestMouthSequenceCancel();
+        StopBlinkTimer();
+
         auto* context = new AvatarFetchContext;
         context->board = this;
         context->url = url->valuestring;
@@ -3129,6 +3312,7 @@ public:
         if (ok != pdPASS) {
             ESP_LOGE(TAG, "OnAvatarSetFetch: failed to create avatar_fetch task");
             delete context;
+            avatar_fetch_in_progress_.store(false, std::memory_order_release);
             SendAvatarSetLoadedError("", "task_create_failed");
         }
     }
@@ -3162,14 +3346,29 @@ public:
                 SendAvatarSetLoaded(ok, actual_checksum, error_code);
             });
 
+        // Fetch finished (success or failure). Clear the in-progress flag
+        // BEFORE replaying pending state — otherwise the public
+        // SetAvatarExpression / SetMouthShape / StartBlinkTimer calls
+        // inside ApplyPendingAvatarAfterFetch would loop back into the
+        // defer helpers and the pending state would never be drained.
+        avatar_fetch_in_progress_.store(false, std::memory_order_release);
+
         // After a successful Load the previously displayed face is still
         // pointing into the freed static-table data via avatar_img_; force a
         // refresh so the new AvatarSet entry is picked up by the next
-        // RenderAvatarLocked() call (driven by SetAvatarExpressionIfActive
-        // below). Skipped on failure (the old image is still valid).
+        // RenderAvatarLocked() call. Skipped on failure (the old static
+        // image is still valid since AvatarSet::Load preserves the
+        // previous buffer on size/allocation errors).
         if (avatar_set_.is_loaded()) {
             SetAvatarExpressionIfActive(current_avatar_face_.c_str());
         }
+
+        // Replay the latest face / mouth / blink intent the user expressed
+        // while the fetch was running. Order: "off" wins over a face if
+        // both were issued (mutually exclusive on the face axis); blink
+        // restoration happens last so a successful fetch doesn't restart
+        // blink if the user disabled it mid-fetch.
+        ApplyPendingAvatarAfterFetch();
     }
 
     static void SendAvatarSetLoaded(
