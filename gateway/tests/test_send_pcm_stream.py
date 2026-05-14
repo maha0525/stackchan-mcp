@@ -303,6 +303,52 @@ async def test_stream_skips_resample_at_device_rate(
     await send_pcm_stream(gateway, _aiter([chunk]))
 
 
+@pytest.mark.asyncio
+async def test_stream_handles_odd_byte_chunks_under_resample(
+    fake_opuslib, monkeypatch,
+):
+    """Odd-byte chunks must not crash when resampling.
+
+    HTTP producers slicing aiohttp's StreamReader at arbitrary TCP
+    boundaries routinely deliver chunks whose byte count is odd; the
+    underlying ``array.array("h").frombytes()`` inside
+    ``resample_pcm16_linear`` rejects those with ``ValueError: bytes
+    length not a multiple of item size``. The orchestrator is
+    responsible for carrying the unpaired trailing byte across
+    iterations so partial 16-bit samples never reach the resampler.
+    """
+    import stackchan_mcp.tts.orchestrator as orchestrator
+
+    seen_lengths: list[int] = []
+    real_resample = orchestrator.resample_pcm16_linear
+
+    def spy_resample(pcm: bytes, src_rate: int, dst_rate: int) -> bytes:
+        seen_lengths.append(len(pcm))
+        return real_resample(pcm, src_rate, dst_rate)
+
+    monkeypatch.setattr(orchestrator, "resample_pcm16_linear", spy_resample)
+
+    # Three odd-length chunks at 32 kHz. Their concatenation is even
+    # (3+5+7 = 15 → with 1 byte left over after the third), exercising
+    # both the "carry tail forward" path and the "drop final stray byte"
+    # path. Sizes are intentionally tiny to keep the assertion explicit.
+    chunks = [b"\x01" * 3, b"\x02" * 5, b"\x03" * 7]
+    esp32 = _FakeESP32(connected=True)
+    gateway = _FakeGateway(esp32)
+
+    # Must not raise — the fix's whole job is to suppress the
+    # ValueError that used to leak out of frombytes().
+    await send_pcm_stream(gateway, _aiter(chunks), source_rate=32000)
+
+    # Every chunk handed to the real resampler must be sample-aligned.
+    assert seen_lengths, "resampler was never invoked"
+    for n in seen_lengths:
+        assert n % 2 == 0, (
+            f"resample saw odd-length chunk ({n} bytes) — alignment "
+            f"buffer is leaking partial samples"
+        )
+
+
 # ---------------------------------------------------------------------------
 # Input validation
 # ---------------------------------------------------------------------------
