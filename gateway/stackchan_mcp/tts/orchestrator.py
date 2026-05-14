@@ -481,6 +481,15 @@ async def send_pcm_stream(
     sent = 0
     push_error: ConnectionError | None = None
     buffer = bytearray()
+    # 16-bit-sample alignment for the resample path. HTTP producers
+    # (e.g. ``_pcm_chunks_from_request`` slicing aiohttp's StreamReader at
+    # arbitrary TCP boundaries) routinely hand us chunks whose byte count
+    # is odd; the underlying ``array.array("h").frombytes()`` inside
+    # ``resample_pcm16_linear`` rejects those. Carry the unpaired trailing
+    # byte across iterations so partial 16-bit samples never reach the
+    # resampler — at most one byte is buffered, dropped at end-of-stream
+    # (< half a source sample, inaudible).
+    resample_tail = bytearray()
 
     async def _push(opus_frame: bytes) -> bool:
         """Pace, send, advance counters. Returns False on disconnect."""
@@ -521,7 +530,19 @@ async def send_pcm_stream(
                 # Resample each chunk independently. Linear interpolation
                 # introduces no chunk-boundary state, so this is correct
                 # even when chunks are misaligned to frame boundaries.
+                # ``array.array("h").frombytes()`` inside the resampler
+                # still requires whole 16-bit samples, so absorb any
+                # unpaired trailing byte into ``resample_tail`` first and
+                # prepend it to the next chunk.
                 if source_rate != DEVICE_SAMPLE_RATE:
+                    if resample_tail:
+                        chunk = bytes(resample_tail) + chunk
+                        resample_tail.clear()
+                    if len(chunk) & 1:
+                        resample_tail.append(chunk[-1])
+                        chunk = chunk[:-1]
+                    if not chunk:
+                        continue
                     chunk = resample_pcm16_linear(
                         chunk, source_rate, DEVICE_SAMPLE_RATE
                     )
