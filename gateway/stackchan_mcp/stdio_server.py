@@ -103,8 +103,14 @@ def create_server() -> Server:
             Tool(
                 name="move_head",
                 description=(
-                    "Move the robot's head to the specified angles. "
-                    "yaw: horizontal (-90 to 90), pitch: vertical (-30 to 30)."
+                    "Move the robot's head to safe, recommended angles. "
+                    "yaw: horizontal (-90 to 90), pitch: vertical (5 to 85, "
+                    "the M5Stack-recommended operating range). Out-of-range "
+                    "requests are rejected at this MCP layer; for advanced "
+                    "callers that need the firmware hard clamp (pitch 0..88), "
+                    "use the firmware-side `set_head_angles` device tool, "
+                    "which exposes a permissive schema and the authoritative "
+                    "two-tier guard described in the README."
                 ),
                 inputSchema={
                     "type": "object",
@@ -112,10 +118,19 @@ def create_server() -> Server:
                         "yaw": {
                             "type": "integer",
                             "description": "Horizontal angle in degrees (-90 to 90)",
+                            "minimum": -90,
+                            "maximum": 90,
                         },
                         "pitch": {
                             "type": "integer",
-                            "description": "Vertical angle in degrees (-30 to 30)",
+                            "description": (
+                                "Vertical angle in degrees (5 to 85, "
+                                "M5Stack-recommended operating range). For the "
+                                "wider firmware hard clamp (0..88), use the "
+                                "`set_head_angles` device tool instead."
+                            ),
+                            "minimum": 5,
+                            "maximum": 85,
                         },
                     },
                     "required": ["yaw", "pitch"],
@@ -282,6 +297,44 @@ def create_server() -> Server:
                 },
             ),
             Tool(
+                name="set_servo_torque",
+                description=(
+                    "Enable or disable SCS0009 servo torque on the yaw / "
+                    "pitch axes independently. Disabling torque stops motor "
+                    "current on that axis; the head holds via static "
+                    "friction (no motion is commanded). On disable, the "
+                    "firmware also cancels any in-flight MotionDriver "
+                    "interpolation and marks the axis position unknown so "
+                    "a subsequent same-target set_head_angles is re-"
+                    "dispatched rather than no-op-optimized. Re-enabling "
+                    "torque does NOT trigger a move; the next "
+                    "set_head_angles or wobble call will. Diagnostic / "
+                    "power-management primitive used to observe physical "
+                    "head behavior under torque-off (Issue #163; auto "
+                    "release on idle is Issue #152 Phase 4)."
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "yaw_enabled": {
+                            "type": "boolean",
+                            "description": (
+                                "True to enable yaw axis torque, false to "
+                                "disable."
+                            ),
+                        },
+                        "pitch_enabled": {
+                            "type": "boolean",
+                            "description": (
+                                "True to enable pitch axis torque, false "
+                                "to disable."
+                            ),
+                        },
+                    },
+                    "required": ["yaw_enabled", "pitch_enabled"],
+                },
+            ),
+            Tool(
                 name="get_touch_state",
                 description=(
                     "Read the head-touch (Si12T) sensor state and the most recent "
@@ -422,6 +475,9 @@ def create_server() -> Server:
                     "minimal firmware change to handle the inbound 'listen' "
                     "wire type (paired with this gateway release). Engine is "
                     "selectable via 'engine' (default 'faster-whisper', local). "
+                    "Optional 'motion' feedback can switch the avatar to "
+                    "'thinking' during capture ('face-only') or tilt the head "
+                    "up while preserving yaw ('look-up'). "
                     "Install the relevant extra "
                     "('pip install stackchan-mcp[stt-faster-whisper]' or "
                     "'stt-openai'); calling this tool before an engine is "
@@ -464,6 +520,29 @@ def create_server() -> Server:
                                 "whisper, 'whisper-1' for OpenAI). Engines "
                                 "fall back to their default when omitted."
                             ),
+                        },
+                        "motion": {
+                            "type": "string",
+                            "enum": ["none", "face-only", "look-up"],
+                            "description": (
+                                "Optional visible feedback during capture. "
+                                "'none' preserves the previous behaviour. "
+                                "'face-only' shows the thinking avatar during "
+                                "capture and restores idle at the end. "
+                                "'look-up' preserves yaw, tilts pitch to "
+                                "look_up_pitch, and holds the pose on success."
+                            ),
+                            "default": "none",
+                        },
+                        "look_up_pitch": {
+                            "type": "number",
+                            "description": (
+                                "Pitch angle for motion='look-up'. Must be "
+                                "between 5 and 85 degrees."
+                            ),
+                            "default": 50.0,
+                            "minimum": 5,
+                            "maximum": 85,
                         },
                     },
                 },
@@ -598,6 +677,59 @@ def create_server() -> Server:
                 )
             ]
 
+        if name == "move_head":
+            # Belt-and-suspenders validation for the recommended pitch range.
+            # The Tool inputSchema already declares minimum/maximum for both
+            # yaw and pitch, but mcp Python SDK server-side enforcement of
+            # JSON Schema bounds is not guaranteed across versions and
+            # clients. Reject out-of-recommended values here as a clean
+            # MCP error JSON before any motion command reaches the device.
+            # Callers that genuinely need the firmware hard clamp 0..88
+            # should use the firmware-side `set_head_angles` device tool,
+            # which exposes the authoritative two-tier guard described in
+            # the README "Y-axis (pitch) safe range" section.
+            yaw_val = arguments.get("yaw")
+            pitch_val = arguments.get("pitch")
+            if (
+                not isinstance(yaw_val, int)
+                or isinstance(yaw_val, bool)
+                or not (-90 <= yaw_val <= 90)
+            ):
+                return [
+                    TextContent(
+                        type="text",
+                        text=json.dumps(
+                            {
+                                "error": (
+                                    "yaw must be an integer in -90..90 "
+                                    f"(got {yaw_val!r})"
+                                )
+                            }
+                        ),
+                    )
+                ]
+            if (
+                not isinstance(pitch_val, int)
+                or isinstance(pitch_val, bool)
+                or not (5 <= pitch_val <= 85)
+            ):
+                return [
+                    TextContent(
+                        type="text",
+                        text=json.dumps(
+                            {
+                                "error": (
+                                    "pitch must be an integer in 5..85 "
+                                    "(M5Stack-recommended operating range; "
+                                    "for the wider firmware hard clamp "
+                                    "0..88 use `set_head_angles`). got "
+                                    f"{pitch_val!r}"
+                                )
+                            }
+                        ),
+                    )
+                ]
+
         # Map MCP client tool names to ESP32 MCP tool names (self.* prefix)
         tool_map: dict[str, tuple[str, dict[str, Any]]] = {
             "get_device_info": (
@@ -653,6 +785,10 @@ def create_server() -> Server:
             ),
             "set_blink": (
                 "self.display.set_blink",
+                arguments,
+            ),
+            "set_servo_torque": (
+                "self.robot.set_servo_torque",
                 arguments,
             ),
             "get_touch_state": (

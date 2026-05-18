@@ -15,6 +15,283 @@ change is called out under a `Firmware` subsection of the release entry.
 
 ## [Unreleased]
 
+### Gateway
+
+- Added hardware-lane aware dispatch for ESP32 tool calls. Independent
+  hardware lanes (servo, LED, avatar/display, screen, audio, camera,
+  touch, status) now pipeline concurrently on the gateway side, while
+  ordering within the same lane is preserved. The existing
+  `ESP32Manager.call_tool()` API remains compatible. `tools/call`
+  send-failure handling is also hardened: WebSocket send failures now
+  mark the ESP32 connection disconnected and no longer leave
+  unobserved pending future exceptions. Refs
+  [#73](https://github.com/kisaragi-mochi/stackchan-mcp/issues/73)
+  (firmware-side `tools/call` execution remains serialized by
+  `Application::Schedule()`, so Issue #73 stays open as the
+  firmware-side follow-up).
+
+### Firmware
+
+- #152 Phase 3 — replaced normal-runtime `HostInterpolationMotionDriver`
+  linear interpolation with `smooth_ui_toolkit` spring physics
+  (`AnimateValue` per axis, m5stack/StackChan-equivalent default spring,
+  `duration_ms`-driven stiffness/damping mapping, and real-elapsed-time
+  spring ticks). The default `CONFIG_STACKCHAN_SERVO_FEETECH=y` path now
+  uses natural-spring host-side interpolation for MCP `move_head` and touch
+  wobble; boot-time `InitializeServo()` slow climb remains on
+  duration-bounded linear interpolation to avoid wake-up snap motion. The
+  `CONFIG_STACKCHAN_SERVO_DELEGATED_MOTION=y` opt-in path is unchanged
+  from Phase 2 / PR #154.
+
+- Added a post-init `ReadPos` re-sync step ("Phase 0'") to
+  `InitializeServo()` that re-reads the SCS0009 actual position after
+  the boot-init `WriteHeadAngles` interpolation completes and
+  overwrites `pitch_motion_.current_deg` / `yaw_motion_.current_deg`
+  with the actual physical position. This eliminates the firmware-side
+  / SCS0009-actual mismatch that the #138 safe-fallback intentionally
+  leaves behind on the PMIC long-press OFF / ON boot path, where
+  Phase 0's `WriteHeadAngles(0, 45, ...)` is a no-op of effect because
+  `current_deg` was seeded equal to the target. Without Phase 0',
+  `move_head(0, 45)` immediately after such a boot returned
+  `pitch_motion_started: 0` (firmware sees `current_deg == target`, no
+  interpolation starts), and `get_head_angles` returned the actual
+  position (e.g. 38°) — a contradictory observation hard to attribute
+  correctly without firmware-internals knowledge. Phase 0 is also now
+  distance-aware: its duration is computed from the actual
+  `current_deg → BOOT_INIT_*_DEG` delta at a new
+  `BOOT_INIT_TARGET_DEG_PER_SEC = 15 °/s` cap, floored at
+  `BOOT_INIT_MOVE_MS = 3000 ms` to keep the SCS0009 wake-up latency
+  window covered. New `BOOT_INIT_TARGET_DEG_PER_SEC` constant is
+  additive; existing `BOOT_INIT_YAW_DEG=0` / `BOOT_INIT_PITCH_DEG=45`
+  semantics preserved. Closes
+  [#141](https://github.com/kisaragi-mochi/stackchan-mcp/issues/141).
+
+- Refactored `ServoDelegatedMotionDriver` (opt-in via
+  `CONFIG_STACKCHAN_SERVO_DELEGATED_MOTION=y`) so that bus dispatch
+  and `ReadMove` polling happen per-axis under a short-hold
+  `scs_bus_mutex_`, removing the bundled two-axis critical section.
+  This eliminates the necessary side of the residual hang trigger
+  documented in PR #146 (two-axis simultaneous dispatch combined with
+  pitch end-stop proximity or cumulative load). Internal `AxisServo`
+  private nested class introduced; public `MotionDriver` interface
+  unchanged. `HostInterpolationMotionDriver` (default Kconfig path)
+  is byte-equivalent. (#152 Phase 2)
+
+- Added [`smooth_ui_toolkit`](https://github.com/Forairaaaaa/smooth_ui_toolkit)
+  v2.12.0 (MIT, Copyright (c) 2023 Forairaaaaa) as a git-submodule
+  ESP-IDF component dependency under
+  `firmware/components/smooth_ui_toolkit/`, wired into the main
+  component via `PRIV_REQUIRES`. No source-level consumer yet; this
+  stages the dependency for the upcoming motion-subsystem migration
+  tracked in
+  [#152](https://github.com/kisaragi-mochi/stackchan-mcp/issues/152)
+  (Phase 1). Contributors building from source must run
+  `git submodule update --init --recursive` after pulling.
+
+- Added a `MotionDriver` abstraction for StackChan servo motion and an
+  opt-in `CONFIG_STACKCHAN_SERVO_DELEGATED_MOTION` path that delegates
+  move timing to the SCS0009 via single-shot `WritePos(..., time, 0)`
+  commands plus `ReadMove()` polling, while keeping the existing
+  host-interpolation path as the default fallback (default `n`). The
+  MCP tool surface is unchanged. Real-device verification on
+  M5Stack CoreS3 + SCS0009 ×2 shows the delegated path substantially
+  mitigates the bus-hang surface historically tracked under
+  [#100](https://github.com/kisaragi-mochi/stackchan-mcp/issues/100):
+  single-axis large-angle reversals, two-axis moves with mid-range
+  pitch from a clean state, and pitch-only large-angle reversals
+  (including end-stop proximity) all complete cleanly. A residual hang
+  trigger requiring two-axis simultaneous dispatch combined with either
+  pitch end-stop proximity or cumulative session load remains;
+  mitigations are split to
+  [#147](https://github.com/kisaragi-mochi/stackchan-mcp/issues/147) /
+  [#148](https://github.com/kisaragi-mochi/stackchan-mcp/issues/148) /
+  [#149](https://github.com/kisaragi-mochi/stackchan-mcp/issues/149).
+  A related boot-init `current_deg` mismatch corner case after PMIC
+  OFF/ON is tracked under
+  [#150](https://github.com/kisaragi-mochi/stackchan-mcp/issues/150).
+  Default flip is deferred to a subsequent release after these
+  mitigations land. The `position_unknown` sentinel detects and reports
+  any residual trip on the firmware side; recovery still requires
+  PMIC OFF/ON. Refs
+  [#143](https://github.com/kisaragi-mochi/stackchan-mcp/issues/143).
+
+- Fixed user-configured WebSocket gateway URLs (e.g.
+  `ws://192.168.x.y:8765`) being silently overwritten on every boot by
+  the upstream xiaozhi OTA-config response. `Ota::CheckVersion()` still
+  runs (firmware-version / activation / server-time / MQTT paths are
+  unchanged), but the `websocket` section of the response is no longer
+  written back into NVS by default. A new Kconfig option
+  `CONFIG_DISABLE_OTA_WEBSOCKET_CONFIG` (default `y`) gates this
+  behavior; setting it to `n` restores the original
+  xiaozhi-esp32 NVS overwrite path. The misleading comment in
+  `WebsocketProtocol::OpenAudioChannelInternal()` that claimed the
+  OTA-config path was already disabled has been corrected to reflect
+  the actual gating. Closes
+  [#110](https://github.com/kisaragi-mochi/stackchan-mcp/issues/110).
+
+- The firmware now actively positions the head at a fall-safe neutral
+  pose (`yaw=0°`, `pitch=45°`) at the end of `InitializeServo()`, before
+  any MCP command can arrive. Previously the head retained whatever
+  angle it was left at on power-down, which could include end-stop
+  positions (e.g. `pitch=0°`) that triggered the SCS0009 bus hang
+  documented in
+  [#100](https://github.com/kisaragi-mochi/stackchan-mcp/issues/100)
+  on the first user-driven motion. The new boot-time positioning uses
+  the existing interpolating `WriteHeadAngles` path with a 1-second
+  move duration plus a 100 ms settle delay, mirroring the `goHome()`
+  pattern in `m5stack/StackChan` and the timing established in
+  `mongonta0716/stackchan-arduino`. Existing pitch guards (`0..88`
+  hard clamp / `5..85` recommended range) continue to apply
+  unchanged. Implements
+  [#99](https://github.com/kisaragi-mochi/stackchan-mcp/issues/99)
+  Option C and the boot-init aspect of
+  [#100](https://github.com/kisaragi-mochi/stackchan-mcp/issues/100)
+  direction E. Refs
+  [#115](https://github.com/kisaragi-mochi/stackchan-mcp/issues/115).
+
+- Improved `get_head_angles` MCP-tool diagnostics so that transient
+  `ReadPos` failures can be distinguished from a genuine SCS0009 bus
+  hang. The handler now retries `ReadPos` up to three times (50 ms
+  inter-attempt delay) per servo ID while holding `scs_bus_mutex_`
+  across the whole sequence. The success-path JSON output
+  (`{"yaw":N,"pitch":N}`) is unchanged; on persistent failure the tool
+  now returns
+  `{"yaw":null,"pitch":null,"error":"ReadPos failed ...","servo_ok":bool,"yaw_attempts":N,"pitch_attempts":N}`
+  instead of the previous sentinel `{"yaw":-144,"pitch":-194}` (the
+  `-1` return from `ReadPos` run through the same
+  `(pos-zero) * 5 / 16` degree-conversion math as a valid raw position,
+  which was indistinguishable from a hang at the MCP layer and
+  contributed to the hang judgments recorded in
+  [#1](https://github.com/kisaragi-mochi/stackchan-mcp/issues/1) /
+  [#100](https://github.com/kisaragi-mochi/stackchan-mcp/issues/100) /
+  [#118](https://github.com/kisaragi-mochi/stackchan-mcp/issues/118)).
+  The serial-log line is also expanded to include `servo_ok`, raw
+  `ReadPos` values, and attempt counts. As a further investigation
+  aid, `InitializeServo()` now logs pre- and post-init `ReadPos` raw
+  values and tick timestamps around the boot-init `WriteHeadAngles`
+  call, making the "unintended downward drop on power-on" investigation
+  ([#121](https://github.com/kisaragi-mochi/stackchan-mcp/issues/121))
+  data-driven via the serial log. Refs
+  [#123](https://github.com/kisaragi-mochi/stackchan-mcp/issues/123).
+
+- The boot-time `WriteHeadAngles` interpolated move added in #115 /
+  PR #117 now runs over 4 seconds instead of 1, dropping the
+  effective angular speed for the post-power-on climb to the
+  fall-safe neutral pose from approximately 45°/s to approximately
+  11°/s. On-device feedback identified the original 1-second
+  duration as startling ("ブルンっ" / audible servo stress) on the
+  CoreS3 + SCS0009 hardware. The move is otherwise unchanged — same
+  target (`yaw=0°`, `pitch=45°`), same path through
+  `WriteHeadAngles` / the `servo_motion` task, same 100 ms
+  post-settle vTaskDelay margin (so total boot-init now takes about
+  4.1 seconds instead of 1.1 seconds before the first MCP command
+  can arrive). Refs
+  [#121](https://github.com/kisaragi-mochi/stackchan-mcp/issues/121)
+  Problem 2 (climb speed); the separate "unintended downward drop on
+  power-on" (#121 Problem 1 / hypotheses 1–3) remains under
+  investigation and is unaffected by this change.
+
+- Fixed a missing trailing comma in
+  `firmware/main/boards/freenove-esp32s3-display-2.8-lcd/config.json`
+  that caused `release.py` to fail to parse the file and silently skip
+  the `sdkconfig_append` entries for the
+  `freenove-esp32s3-display-2.8-lcd` board variant. The variant builds
+  now pick up `CONFIG_LANGUAGE_EN_US=y`,
+  `CONFIG_SR_WN_WN9S_HIESP=y`, and `CONFIG_SR_WN_WN9_HIESP=y` as
+  intended, and the spurious `[ERROR] Failed to parse ...` line is no
+  longer printed during any `release.py` invocation. The default
+  `release.py stackchan` build, which only targets the `stackchan`
+  board, is unaffected. Closes
+  [#113](https://github.com/kisaragi-mochi/stackchan-mcp/issues/113).
+
+- Added a boot-time snap-suppress hold to `InitializeServo()` to
+  mitigate the [#121](https://github.com/kisaragi-mochi/stackchan-mcp/issues/121)
+  Problem 1 "downward drop on power-on" symptom. Immediately after the
+  existing pre-init `ReadPos` diagnostic, the firmware now issues a
+  `WritePos(id, current_pos, time=0, speed=0)` per servo, which the
+  SCS0009 treats as a new target equal to its current position and uses
+  to truncate any in-progress "snap-to-last-target" motion. Background:
+  the SCS0009 retains its commanded set-point across power cycles
+  (Hypothesis 1 in #121, confirmed by the firmware-v1.4.1 clean-install
+  reproduction in which `Boot pre-init ReadPos` still matched the
+  pre-power-off pose exactly after a full NVS reset on the ESP32 side,
+  demonstrating the set-point lives in the servo itself). When `VM_EN`
+  asserts at hardware power-on the servo restores torque and snaps
+  toward that retained target before any firmware-side speed limiting
+  can apply, audible as a mechanical end-stop impact when the previous
+  session ended near `pitch=0°`. Efficacy is observable in the serial
+  log via new `Boot snap-suppress yaw/pitch hold(pos=...): r=...`
+  lines; if `ReadPos` already captured an end-stop position the hold is
+  a no-op for that boot and a deeper fix (e.g. firmware-controlled
+  `VM_EN` sequencing through the PY32 IO-expander) would be required,
+  tracked separately. The pitch hold is additionally gated on the
+  `ReadPos` raw value falling inside the same `SAFE_PITCH_MIN..
+  SAFE_PITCH_MAX` range as every other pitch servo-write boundary in
+  the firmware: out-of-range reads (e.g. the head was hand-pushed past
+  an end-stop pre-boot, or the previous session's set-point fell
+  outside the safe range) skip the hold and let the subsequent
+  interpolating boot-init climb to `(yaw=0°, pitch=45°)` drive the
+  head back into the safe range through the existing speed-limited
+  path, instead of pinning the servo against an out-of-range raw
+  position. Refs
+  [#121](https://github.com/kisaragi-mochi/stackchan-mcp/issues/121)
+  Problem 1.
+
+- Extended the boot-time snap-suppress hold added for #121 Problem 1
+  (PR #137) so that it actually fires on the PMIC long-press OFF / ON
+  path, by retrying the pre-hold `ReadPos` long enough to absorb the
+  SCS0009 `~200 ms` startup latency after `VM_EN` HIGH. Each `ReadPos`
+  in `InitializeServo()` is now attempted up to 5 times at 50 ms
+  intervals (250 ms total budget per axis), well above the observed
+  wake-up latency window. The `Boot pre-init ReadPos` diagnostic line
+  now includes the attempt count taken
+  (`yaw_raw=N (attempts=K) pitch_raw=N (attempts=K)`). If all retries
+  still fail (e.g. a genuine SCS0009 bus hang per #100), the firmware
+  seeds `pitch_motion_.current_deg` with `BOOT_INIT_PITCH_DEG` (45°)
+  instead of leaving the struct-default `current_deg=0`, so the
+  subsequent boot-init `WriteHeadAngles(0, 45, 4000)` interpolation
+  becomes a near-no-op rather than walking `WritePos` calls upward
+  from `pos=620` (the lower mechanical end-stop) through
+  end-stop-adjacent positions. The `BOOT_INIT_YAW_DEG` /
+  `BOOT_INIT_PITCH_DEG` / `BOOT_INIT_MOVE_MS` constants are promoted
+  from local block scope to class-level `static constexpr` so the
+  safe-fallback branch can reference them. Closes
+  [#138](https://github.com/kisaragi-mochi/stackchan-mcp/issues/138).
+  Refs
+  [#121](https://github.com/kisaragi-mochi/stackchan-mcp/issues/121)
+  Problem 1.
+
+## [0.7.0] - 2026-05-14
+
+### Gateway
+
+- `listen()` now accepts optional visual/motion feedback arguments:
+  `motion="face-only"` shows the `thinking` avatar during capture and
+  restores `idle` at the end, while `motion="look-up"` preserves yaw,
+  tilts pitch to `look_up_pitch` (validated to 5..85 degrees), shows
+  `thinking`, and holds the pose on success so the caller's response
+  can continue from the attentive posture. The default
+  `motion="none"` preserves the existing behavior. Refs #96.
+
+- `move_head` MCP tool now constrains `pitch` to `5..85` — the
+  M5Stack-recommended operating range. Both the `inputSchema`
+  (`minimum: 5`, `maximum: 85` for `pitch`; `minimum: -90`, `maximum: 90`
+  for `yaw`) and the gateway `call_tool` handler enforce the bound as
+  belt-and-suspenders. The tool description now references
+  `set_head_angles` for callers that genuinely need the wider firmware
+  hard clamp (`0..88`). This also refuses `move_head(yaw=0, pitch=0)`
+  and other below-`5°` pitch requests at the MCP boundary, so an
+  LLM-driven agent cannot trigger the SCS0009 servo bus hang state
+  tracked in
+  [#100](https://github.com/kisaragi-mochi/stackchan-mcp/issues/100)
+  from a default pose-reset call. See README "Y-axis (pitch) safe
+  range — two-tier guard" for the gateway-side restrictive vs
+  firmware-side permissive policy contrast, and the comment thread on
+  [#99](https://github.com/kisaragi-mochi/stackchan-mcp/issues/99) /
+  [#100](https://github.com/kisaragi-mochi/stackchan-mcp/issues/100)
+  for the on-device reproduction (2026-05-14). Closes
+  [#109](https://github.com/kisaragi-mochi/stackchan-mcp/issues/109).
+
 ## [0.6.0] - 2026-05-12
 
 ### Added

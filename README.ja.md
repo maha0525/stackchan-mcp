@@ -50,7 +50,7 @@
 | `take_photo(question?)` | カメラ撮影 → JPEG 保存 → パス返す | ✅ |
 | `set_volume(volume)` | スピーカー音量 (0-100) | ✅ |
 | `set_brightness(brightness)` | 画面明るさ (0-100) | ✅ |
-| `move_head(yaw, pitch, speed?)` | 首を動かす (サーボ) | ✅ |
+| `move_head(yaw, pitch, speed?)` | 首を動かす (サーボ)。`pitch` は M5Stack 推奨運用レンジ `5..85` に制限される。ファームウェア側のハードクランプ (`0..88`) を使いたい場合は、firmware-side の `set_head_angles` デバイスツールを利用する | ✅ |
 | `get_touch_state` | タッチセンサ状態 (press/release/stroke 等) | ✅ |
 | `set_avatar(face)` | アバター表情切替 (`idle` / `happy` / `thinking` / `sad` / `surprised` / `embarrassed`)、または `off` でアバターを隠し blink も停止して下層の WiFi 設定 / OTA / 設定画面を露出。他 face を指定するとアバター + blink が復帰 | ✅ |
 | `set_blink(state)` | 瞬き ON/OFF | ✅ |
@@ -62,7 +62,7 @@
 | `set_leds(colors)` | `[[r,g,b], ...]` 配列で先頭 N 個を一括設定（I2C 1 回のバースト送信、アニメーション等向け）。指定外の LED は前の色を保持 | ✅ |
 | `clear_leds` | ベース部の RGB LED 12 個すべて消灯 | ✅ |
 | `say(text, voice?, speaker_id?, reference_audio?)` | gateway 側 TTS でデバイススピーカーから喋らせる。デフォルトエンジンは **VOICEVOX**（別 HTTP サービスとして起動 — [TTS セットアップ](#4-オプション-tts-セットアップ-voicevox) 参照）。`[tts]` extras が必要 | ✅ |
-| `listen(duration_ms?, engine?, language?, model?)` | デバイスマイクから短い発話をキャプチャし、gateway 側 STT で文字起こし。デフォルトエンジンは **faster-whisper**（ローカル動作・MIT — [STT セットアップ](#5-オプション-stt-セットアップ-faster-whisper) 参照）。`[stt-faster-whisper]`（または `[stt-openai]`）extras と、`listen` ワイヤタイプを受け付けるファームウェアが必要 | ✅ |
+| `listen(duration_ms?, engine?, language?, model?, motion?, look_up_pitch?)` | デバイスマイクから短い発話をキャプチャし、gateway 側 STT で文字起こし。デフォルトエンジンは **faster-whisper**（ローカル動作・MIT — [STT セットアップ](#5-オプション-stt-セットアップ-faster-whisper) 参照）。任意の `motion` feedback で、キャプチャ中に `thinking` face を出したり、頭を上向きに傾けたりできます。`[stt-faster-whisper]`（または `[stt-openai]`）extras と、`listen` ワイヤタイプを受け付けるファームウェアが必要 | ✅ |
 
 詳細スキーマは `gateway/README.md` 参照。
 
@@ -77,6 +77,11 @@
 [Releases ページ](https://github.com/kisaragi-mochi/stackchan-mcp/releases) から最新の `firmware-v*` リリースを開き、`merged-binary.bin`（必要なら `xiaozhi.bin` も）をダウンロード。あとは `esptool.py` で焼くだけ:
 
 ```bash
+# --port は使っている OS のシリアルデバイス名に置き換えてください:
+#   macOS:   /dev/cu.usbmodem* (例: /dev/cu.usbmodem1101)
+#   Linux:   /dev/ttyUSB0 または /dev/ttyACM0
+#   Windows: COM3 (デバイスマネージャに表示されるポート名)
+
 # 新規インストール（NVS が消えるので Wi-Fi 設定はやり直し）:
 esptool.py --chip esp32s3 --port /dev/cu.usbmodem1101 -b 460800 \
   write_flash 0x0 merged-binary.bin
@@ -90,23 +95,38 @@ ESP-IDF や Docker のセットアップは不要。
 
 #### オプション B: ソースから Docker でビルド（コントリビュータ向け）
 
+このリポジトリは `firmware/components/` 配下に git submodule を使っています。
+`--recursive` を付けずに clone した場合は、先に初期化してください:
+
+```bash
+git submodule update --init --recursive
+```
+
+その後ビルド:
+
 ```bash
 cd firmware
-docker run --rm --ulimit nofile=65536:65536 \
+docker run --rm --cpus=4 --ulimit nofile=65536:65536 \
   -v $PWD:/project -w /project espressif/idf:v5.5.2 \
   python ./scripts/release.py stackchan
 # → releases/v2.2.6_stackchan.zip
 
 # フラッシュ (CoreS3 を USB 接続後)
+# --port は使っている OS のシリアルデバイス名に置き換えてください
+# — オプション A の表（macOS/Linux/Windows）を参照
 esptool.py --chip esp32s3 --port /dev/cu.usbmodem1101 -b 460800 \
   write_flash 0x0 build/merged-binary.bin
 ```
 
-`--ulimit nofile=65536:65536` フラグは、macOS Docker（OrbStack /
-Docker Desktop）のデフォルトのファイルディスクリプタ上限下で LVGL の
-emoji コンパイル時に発生する `Too many open files` エラーを回避するため
-に付けています。Linux ホストではデフォルトの `nofile` が十分高いため
-影響ありませんが、無条件に付けて問題なく、CI とも揃います。
+`--cpus=4` フラグは Docker コンテナの並列度をキャップして、LVGL や
+`xiaozhi-fonts/emoji_*.c` のコンパイル時の同時 `gcc` 数を抑えるためのものです。これがないと `ninja` が `/proc/cpuinfo` から CPU 数を
+自動検出し、その結果並列に動く `gcc` がコンテナのメモリを使い切って、
+物理 RAM に余裕があるホストでも LVGL の途中で `Cannot allocate memory`
+で build が落ちることがあります（#112 で追跡）。`--ulimit
+nofile=65536:65536` フラグは別の問題で、同じ LVGL emoji コンパイル時に
+デフォルトのファイルディスクリプタ上限下で発生する `Too many open
+files` エラーを回避します。Linux ホストではデフォルトが十分高いため
+影響ありませんが、両フラグを無条件に付けて問題なく、CI とも揃います。
 
 書き込み後、WiFi 設定は ESP32 が起動してから行う — スマホで設定 UI に接続（xiaozhi-esp32 標準フロー）。
 
@@ -384,8 +404,13 @@ gateway がデバイスに `{"type":"listen","state":"start","mode":"manual"}`
 STT エンジンに渡して文字起こし、という流れです。`faster-whisper`
 エンジンの初回呼び出しではモデル（`base` で約 140 MB）が Hugging
 Face キャッシュにダウンロードされ、以降は再利用されます。
-STT フレームワークもエンジン非依存なので、Vosk・whisper.cpp・他の
-クラウドサービス等を `listen` API を変えずに後から追加できます。
+見た目でキャプチャ中であることを示したい場合は、`motion="face-only"`
+でキャプチャ中に `thinking` アバターを表示して終了時に `idle` へ戻すか、
+`motion="look-up"` で yaw を保ったまま pitch を `look_up_pitch`
+（デフォルト 50°、有効範囲 5..85°）へ傾け、`thinking` を表示し、
+成功時はその姿勢を保持できます。STT フレームワークもエンジン非依存なので、
+Vosk・whisper.cpp・他のクラウドサービス等を `listen` API を変えずに
+後から追加できます。
 
 ## アバター画像について
 
@@ -447,6 +472,8 @@ M5Stack 公式ドキュメントには以下の警告があります:
 
 `set_head_angles` MCP ツールは pitch を完全に **permissive** な schema range として宣言しています — `int` 型の全範囲 (`std::numeric_limits<int>::min()` から `std::numeric_limits<int>::max()` まで、境界値含む)。Tier 1 の権威ある enforcement は firmware ハンドラ側にあります — schema range を狭めると `McpServer::Property` が十分に極端な out-of-range リクエスト (例: `pitch=200` や `pitch=INT_MIN`) をハンドラ呼び出し前に reject してしまい、ドキュメントに書かれた Tier 1 挙動が到達不能になります（詳しくは #98 を参照）。`0°` 未満のリクエストは `0°` に引き上げられ (`ESP_LOGW`)、`88°` 超のリクエストは `88°` に引き下げられ (`ESP_LOGW`)、`[0, 88]` 内かつ `[5, 85]` 外のリクエストはそのまま受け入れた上で `ESP_LOGI` のソフトシグナルを出力します。過去に `-30..+30°` を target にしていた caller はそのまま動作します（負側は `0°` にクランプされます）。
 
+対照的に、**gateway 側の `move_head` MCP ツール** — 上記のツール一覧で LLM クライアントが見るのはこちら — は `pitch=5..85` / `yaw=-90..90` の restrictive な schema を宣言し、gateway `call_tool` ハンドラでも同じ境界を二重に enforce しています（belt-and-suspenders）。これにより、推奨範囲外のリクエストを MCP 境界で reject して、エージェントが `move_head(yaw=0, pitch=0)` のような姿勢リセット呼び出しで [#100](https://github.com/kisaragi-mochi/stackchan-mcp/issues/100) で track されているバスハング状態を誤って誘発しないようにしています。診断やリカバリ等で firmware Tier 1 ハードクランプそのものを使いたい上級用途では、`move_head` を経由せず firmware-side の `set_head_angles` デバイスツールを直接呼んでください — [#109](https://github.com/kisaragi-mochi/stackchan-mcp/issues/109) 参照。
+
 X 軸 (yaw、`-90..+90°`) には同等のハードウェア制限はなく — M5Stack 公式が「X 軸には角度制限は不要」と明記しています — 宣言範囲全体を使えます。
 
 下限の経緯は [#80](https://github.com/kisaragi-mochi/stackchan-mcp/issues/80)、2 層ガードへの拡張 (firmware ハードクランプ `30°` → `88°`、M5Stack 推奨 `5..85°` をソフトシグナル層に格上げ) は [#98](https://github.com/kisaragi-mochi/stackchan-mcp/issues/98) を参照してください。
@@ -486,7 +513,7 @@ X 軸 (yaw、`-90..+90°`) には同等のハードウェア制限はなく — 
 
 ### upstream
 
-`firmware/` は [78/xiaozhi-esp32](https://github.com/78/xiaozhi-esp32) (MIT) のフォーク ([kisaragi-mochi/xiaozhi-esp32](https://github.com/kisaragi-mochi/xiaozhi-esp32)) を git subtree で取り込んでいます。upstream 同期手順は [`docs/firmware-sync.md`](docs/firmware-sync.md) を参照してください。SCServo_lib は公式 [stack-chan](https://github.com/mongonta0716/stack-chan) (タカヲさん) から移植したファームウェアコンポーネントです。
+`firmware/` は [78/xiaozhi-esp32](https://github.com/78/xiaozhi-esp32) (MIT) のフォーク ([kisaragi-mochi/xiaozhi-esp32](https://github.com/kisaragi-mochi/xiaozhi-esp32)) を git subtree で取り込んでいます。upstream 同期手順は [`docs/firmware-sync.md`](docs/firmware-sync.md) を参照してください。`firmware/main/boards/stackchan/` 配下の SCServo_lib ソース (`SCS.{cc,h}`, `SCSCL.{cc,h}`, `SCSerial.{cc,h}`, `INST.h`, `SCServo.h`) は [Feetech](https://www.feetechrc.com/) の SCServo SDK 由来で、同じ `kisaragi-mochi/xiaozhi-esp32` フォークの `main/boards/stackchan/` ディレクトリ経由で firmware subtree merge 時に本リポジトリに取り込まれました。これらは GPL-3.0 のままです (`firmware/main/boards/stackchan/SCServo_lib_LICENSE.txt` 参照)。
 
 ## 関連プロジェクト
 

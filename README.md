@@ -50,7 +50,7 @@ This repository is a monorepo.
 | `take_photo(question?)` | Capture a frame, save as JPEG, return the path | ✅ |
 | `set_volume(volume)` | Speaker volume (0-100) | ✅ |
 | `set_brightness(brightness)` | Screen brightness (0-100) | ✅ |
-| `move_head(yaw, pitch, speed?)` | Move the neck (servos) | ✅ |
+| `move_head(yaw, pitch, speed?)` | Move the neck (servos). `pitch` is constrained to `5..85` — the M5Stack-recommended operating range. For the wider firmware hard clamp (`0..88`), use the firmware-side `set_head_angles` device tool instead. | ✅ |
 | `get_touch_state` | Touch sensor state (press / release / stroke / etc.) | ✅ |
 | `set_avatar(face)` | Switch avatar expression (`idle` / `happy` / `thinking` / `sad` / `surprised` / `embarrassed`), or `off` to hide the avatar and disable blink so the underlying WiFi config / OTA / settings screens are visible. Any other face brings the avatar back and restores blink. | ✅ |
 | `set_blink(state)` | Blink on/off | ✅ |
@@ -62,7 +62,7 @@ This repository is a monorepo.
 | `set_leds(colors)` | Batch-set the first N LEDs from a `[[r,g,b], ...]` array in a single I2C burst (use this for animations / multi-color patterns); trailing LEDs keep their previous color | ✅ |
 | `clear_leds` | Turn all 12 base RGB LEDs off | ✅ |
 | `say(text, voice?, speaker_id?, reference_audio?)` | Speak text on the device speaker via gateway-side TTS. Default engine: **VOICEVOX** (runs as a separate HTTP service — see [TTS setup](#optional-tts-setup-voicevox)). Requires the `[tts]` extra. | ✅ |
-| `listen(duration_ms?, engine?, language?, model?)` | Capture a short utterance from the device microphone and transcribe it via gateway-side STT. Default engine: **faster-whisper** (local, MIT) — see [STT setup](#optional-stt-setup-faster-whisper). Requires the `[stt-faster-whisper]` (or `[stt-openai]`) extra and a firmware update with the inbound `listen` wire type. | ✅ |
+| `listen(duration_ms?, engine?, language?, model?, motion?, look_up_pitch?)` | Capture a short utterance from the device microphone and transcribe it via gateway-side STT. Default engine: **faster-whisper** (local, MIT) — see [STT setup](#optional-stt-setup-faster-whisper). Optional `motion` feedback can show the `thinking` face or tilt the head up during capture. Requires the `[stt-faster-whisper]` (or `[stt-openai]`) extra and a firmware update with the inbound `listen` wire type. | ✅ |
 
 See `gateway/README.md` for full schemas.
 
@@ -77,6 +77,11 @@ There are two paths. **Option A** is recommended for first-time users — no too
 Download the latest firmware bundle from the [Releases page](https://github.com/kisaragi-mochi/stackchan-mcp/releases) — pick the most recent `firmware-v*` release and grab `merged-binary.bin` (and optionally `xiaozhi.bin`). Then flash with `esptool.py`:
 
 ```bash
+# Replace --port with your platform's serial device:
+#   macOS:   /dev/cu.usbmodem* (e.g. /dev/cu.usbmodem1101)
+#   Linux:   /dev/ttyUSB0 or /dev/ttyACM0
+#   Windows: COM3 (or whichever it shows up as in Device Manager)
+
 # Clean install (resets NVS — Wi-Fi settings will need to be re-entered):
 esptool.py --chip esp32s3 --port /dev/cu.usbmodem1101 -b 460800 \
   write_flash 0x0 merged-binary.bin
@@ -90,23 +95,40 @@ No ESP-IDF or Docker setup needed.
 
 #### Option B: Build from source with Docker (for contributors)
 
+This repository uses git submodules under `firmware/components/`. If you
+cloned without `--recursive`, initialize them first:
+
+```bash
+git submodule update --init --recursive
+```
+
+Then build:
+
 ```bash
 cd firmware
-docker run --rm --ulimit nofile=65536:65536 \
+docker run --rm --cpus=4 --ulimit nofile=65536:65536 \
   -v $PWD:/project -w /project espressif/idf:v5.5.2 \
   python ./scripts/release.py stackchan
 # → releases/v2.2.6_stackchan.zip
 
-# Flash (after USB-connecting the CoreS3)
+# Flash (after USB-connecting the CoreS3).
+# Replace --port with your platform's serial device — see the Option A
+# note above for the macOS/Linux/Windows mapping.
 esptool.py --chip esp32s3 --port /dev/cu.usbmodem1101 -b 460800 \
   write_flash 0x0 build/merged-binary.bin
 ```
 
-The `--ulimit nofile=65536:65536` flag avoids a `Too many open files`
-failure during the LVGL emoji compile step under the default macOS
-Docker (OrbStack / Docker Desktop) file-descriptor limit. Linux hosts
-with a higher default `nofile` are unaffected, but passing the flag
-unconditionally is safe and matches CI.
+The `--cpus=4` flag caps Docker container parallelism so the concurrent
+LVGL / `xiaozhi-fonts/emoji_*.c` compile steps stay within the memory
+budget on macOS Docker hosts (OrbStack / Docker Desktop). Without it,
+`ninja` autodetects job count from `/proc/cpuinfo` and the resulting
+parallel `gcc` pressure can exhaust container memory mid-LVGL with
+`Cannot allocate memory` — even on hosts with ample physical RAM
+(tracked as #112). The `--ulimit nofile=65536:65536` flag separately
+avoids a `Too many open files` failure during the same LVGL compile
+step under the default file-descriptor limit. Linux hosts with higher
+defaults are unaffected, but passing both flags unconditionally is
+safe and matches CI.
 
 After flashing, WiFi configuration happens on first boot — connect from a smartphone to the setup UI (the xiaozhi-esp32 standard flow).
 
@@ -434,9 +456,13 @@ capture window, then sends `{"type":"listen","state":"stop"}` and
 hands the buffered audio to the registered STT engine. The first call
 to the `faster-whisper` engine downloads the chosen model (~140 MB
 for `base`) into the Hugging Face cache; subsequent calls reuse it.
-The STT framework is engine-agnostic — additional engines (Vosk,
-whisper.cpp, cloud providers) can be added without changing the
-`listen` API.
+For visible capture feedback, pass `motion="face-only"` to show the
+`thinking` avatar during capture and restore `idle` at the end, or
+`motion="look-up"` to preserve yaw, tilt pitch to `look_up_pitch`
+(default 50°, valid 5..85°), show `thinking`, and hold that pose on
+success. The STT framework is engine-agnostic — additional engines
+(Vosk, whisper.cpp, cloud providers) can be added without changing
+the `listen` API.
 
 ## About the avatar images
 
@@ -491,6 +517,8 @@ M5Stack's official documentation states:
 
 The `set_head_angles` MCP tool declares pitch with a fully permissive schema range — the entire `int` value range, `std::numeric_limits<int>::min()` to `std::numeric_limits<int>::max()`, corner values included; the firmware-side handler is the authoritative Tier 1 enforcement layer. Any narrower schema range would cause `McpServer::Property` to reject sufficiently-extreme out-of-range requests (e.g. `pitch=200` or `pitch=INT_MIN`) before the handler could clamp / log them, leaving the documented Tier 1 behavior unreachable for those callers — see #98. Requests below `0°` are silently raised to `0°` (with `ESP_LOGW`), requests above `88°` are silently lowered to `88°` (with `ESP_LOGW`), and requests inside `[0, 88]` but outside `[5, 85]` are accepted with an `ESP_LOGI` soft signal. Older callers that targeted `-30..+30°` continue to work without modification (the negative half clamps to `0°`).
 
+Conversely, the **gateway-side `move_head` MCP tool** — the one LLM-driven clients see in the tool list above — declares a restrictive `pitch=5..85` / `yaw=-90..90` schema and re-enforces the same bounds in the gateway `call_tool` handler as belt-and-suspenders. This rejects out-of-recommended requests at the MCP boundary so an agent cannot accidentally trigger the bus-hang risk tracked in [#100](https://github.com/kisaragi-mochi/stackchan-mcp/issues/100) from a pose-reset call like `move_head(yaw=0, pitch=0)`. Callers that need explicit access to the firmware Tier 1 hard clamp (for diagnostics, recovery sequences, or other expert use cases) should bypass `move_head` and call the firmware-side `set_head_angles` device tool directly — see [#109](https://github.com/kisaragi-mochi/stackchan-mcp/issues/109).
+
 The X-axis (yaw, `-90..+90°`) is not subject to a comparable hardware restriction — M5Stack's documentation explicitly notes "No angle restriction is required for the X-axis" — and remains usable across its full declared range.
 
 See [#80](https://github.com/kisaragi-mochi/stackchan-mcp/issues/80) for the lower-bound engineering background and [#98](https://github.com/kisaragi-mochi/stackchan-mcp/issues/98) for the two-tier upper-bound widening (firmware hard clamp `30°` → `88°`, with the M5Stack-recommended `5..85°` operating range surfaced as a soft-signal tier).
@@ -535,7 +563,7 @@ The `gateway/` runs as an independent Python process and only talks to the ESP32
 
 ### upstream
 
-`firmware/` is taken in via git subtree from [78/xiaozhi-esp32](https://github.com/78/xiaozhi-esp32) (MIT) — specifically the [kisaragi-mochi/xiaozhi-esp32](https://github.com/kisaragi-mochi/xiaozhi-esp32) fork. See [`docs/firmware-sync.md`](docs/firmware-sync.md) for the upstream sync playbook. SCServo_lib is a firmware component ported from the official [stack-chan](https://github.com/mongonta0716/stack-chan) (Takawo-san) repository.
+`firmware/` is taken in via git subtree from [78/xiaozhi-esp32](https://github.com/78/xiaozhi-esp32) (MIT) — specifically the [kisaragi-mochi/xiaozhi-esp32](https://github.com/kisaragi-mochi/xiaozhi-esp32) fork. See [`docs/firmware-sync.md`](docs/firmware-sync.md) for the upstream sync playbook. The SCServo_lib sources under `firmware/main/boards/stackchan/` (`SCS.{cc,h}`, `SCSCL.{cc,h}`, `SCSerial.{cc,h}`, `INST.h`, `SCServo.h`) originate from [Feetech](https://www.feetechrc.com/)'s SCServo SDK and entered this repository through the same `kisaragi-mochi/xiaozhi-esp32` fork's `main/boards/stackchan/` directory at the firmware subtree merge. They remain GPL-3.0 (see `firmware/main/boards/stackchan/SCServo_lib_LICENSE.txt`).
 
 ## Related projects
 
