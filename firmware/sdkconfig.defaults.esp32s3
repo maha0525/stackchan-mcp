@@ -29,3 +29,11 @@ CONFIG_USB_HOST_CONTROL_TRANSFER_MAX_SIZE=1536
 
 # LVGL Graphics
 CONFIG_LV_USE_SNAPSHOT=y
+
+# Core dump to flash (panic backtrace + register dump retained across reboot)
+# Requires a `coredump` partition in partitions/v2/16m.csv (64K appended at flash end).
+# Retrieve with: idf.py coredump-info -p <PORT>
+CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH=y
+CONFIG_ESP_COREDUMP_DATA_FORMAT_ELF=y
+CONFIG_ESP_COREDUMP_CHECKSUM_CRC32=y
+CONFIG_ESP_COREDUMP_DECODE_INFO=y
