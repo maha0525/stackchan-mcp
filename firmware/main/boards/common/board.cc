@@ -19,7 +19,11 @@ Board::Board() {
         uuid_ = GenerateUuid();
         settings.SetString("uuid", uuid_);
     }
-    ESP_LOGI(TAG, "UUID=%s SKU=%s", uuid_.c_str(), BOARD_NAME);
+    // Boot session ID is regenerated every boot (not persisted to NVS) so
+    // host-side caches can detect device reboot.
+    boot_session_id_ = GenerateUuid();
+    ESP_LOGI(TAG, "UUID=%s session=%s SKU=%s",
+             uuid_.c_str(), boot_session_id_.c_str(), BOARD_NAME);
 }
 
 std::string Board::GenerateUuid() {
