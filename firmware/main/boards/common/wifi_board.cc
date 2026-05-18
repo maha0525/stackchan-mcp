@@ -341,6 +341,12 @@ std::string WifiBoard::GetDeviceStatusJson() {
     cJSON_AddStringToObject(network, "signal", signal);
     cJSON_AddItemToObject(root, "network", network);
 
+    // Boot session ID — regenerated every boot. Host-side caches use this
+    // to detect device reboot (e.g. PSRAM state being wiped) so they can
+    // invalidate stale "already loaded" assumptions.
+    cJSON_AddStringToObject(root, "boot_session_id",
+                            board.GetBootSessionId().c_str());
+
     // Chip temperature
     float temp = 0.0f;
     if (board.GetTemperature(temp)) {

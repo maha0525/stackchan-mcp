@@ -58,6 +58,12 @@ protected:
 
     // 软件生成的设备唯一标识
     std::string uuid_;
+    // Boot session ID: regenerated on every boot via esp_random, NOT
+    // persisted to NVS. Used by host-side cache (e.g. SAIVerse
+    // avatar_loader._last_loaded) to detect device reboot and invalidate
+    // stale state — the host cannot otherwise observe the device's PSRAM
+    // clear because the MCP subprocess survives the device's reset.
+    std::string boot_session_id_;
 
 public:
     static Board& GetInstance() {
@@ -68,6 +74,7 @@ public:
     virtual ~Board() = default;
     virtual std::string GetBoardType() = 0;
     virtual std::string GetUuid() { return uuid_; }
+    virtual std::string GetBootSessionId() const { return boot_session_id_; }
     virtual Backlight* GetBacklight() { return nullptr; }
     virtual Led* GetLed();
     virtual AudioCodec* GetAudioCodec() = 0;
