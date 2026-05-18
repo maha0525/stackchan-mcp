@@ -55,7 +55,8 @@ The `assets` partition stores:
 - `phy_init`: 4KB
 - `ota_0`: 4MB
 - `ota_1`: 4MB
-- `assets`: 8MB
+- `assets`: ~8MB (8MB minus the 64KB coredump tail = `0x7F0000`)
+- `coredump`: 64KB (panic backtrace + register dump, retained across reboot)
 
 ### 16MB Flash Devices (`16m_c3.csv`) - ESP32-C3 Optimized
 - `nvs`: 16KB
@@ -104,4 +105,31 @@ When upgrading from v1 to v2:
 - The `assets` partition size varies by configuration to optimize for different flash sizes
 - ESP32-C3 devices use a smaller assets partition (4MB) due to limited available mmap pages in the system
 - 32MB devices get the largest assets partition (16MB) for maximum content storage
-- All partition tables maintain proper alignment for optimal flash performance 
+- All partition tables maintain proper alignment for optimal flash performance
+
+## Coredump Retrieval (16MB Standard layout)
+
+The `coredump` partition in the 16MB standard layout captures a panic backtrace
+and register dump whenever the firmware aborts via watchdog / panic / stack
+overflow / brownout. The dump survives reboot and can be extracted from the
+device while the issue is fresh:
+
+```bash
+idf.py coredump-info -p <PORT>
+```
+
+This prints the offending task's stack trace, register state, and (when symbols
+are available in `build/`) source-line mappings. To save the raw ELF for
+offline analysis:
+
+```bash
+idf.py coredump-debug -p <PORT>   # interactive gdb against the dump
+```
+
+The dump is cleared by `idf.py erase_flash` or by overwriting the coredump
+partition with a fresh one — a normal `idf.py app-flash` does NOT erase it,
+so the most recent crash remains available until the next panic.
+
+The coredump feature is enabled via `sdkconfig.defaults.esp32s3`
+(`CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH=y` + ELF/CRC32 options); other chip
+families that don't include this configuration leave the partition unused. 
