@@ -2305,7 +2305,19 @@ private:
                     EnterWifiConfigMode();
                     return;
                 }
-                app.ToggleChatState();
+                // listening 中の2回目タッチは Application::HandleToggleChatEvent
+                // の既定経路 (CloseAudioChannel = WS 切断 → gateway の recording
+                // slot が aborted_mid_capture として buffer 破棄) ではなく
+                // StopListening (= SendStopListening) に分岐させる。これで
+                // device-driven audio capture push 経路 (gateway 側
+                // audio_input_hook) が listen.stop を受けて buffer を Ogg 化 +
+                // 外部 hook へ POST できる。Vessel UX として「タッチで listen
+                // 開始 → 発話 → タッチで送信」を成立させるための fork 専用分岐。
+                if (app.GetDeviceState() == kDeviceStateListening) {
+                    app.StopListening();
+                } else {
+                    app.ToggleChatState();
+                }
             }
         }
     }
