@@ -741,6 +741,14 @@ void Application::ToggleChatState() {
 
 void Application::StartListening() {
     ESP_LOGI(TAG, "StartListening() requested (state=%d)", (int)GetDeviceState());
+    // Listening 遷移完了直後に OGG_POPUP を鳴らすため、 HandleStateChangedEvent
+    // の kDeviceStateListening 分岐内 "Play popup sound after ResetDecoder" 経路
+    // (line 980 付近) を有効化する flag を立てる。 既存実装は WakeWord 経路
+    // (HandleWakeWordDetectedEvent / ContinueWakeWordInvoke) でしか true 化
+    // されていなかったので、 タッチ起動 / API 経由の StartListening では音が
+    // 鳴らず体感が悪かった。 ResetDecoder で playback queue がクリアされた
+    // 後に PlaySound が呼ばれるので、 listening 遷移直後でも音が消えない。
+    play_popup_on_listening_ = true;
     xEventGroupSetBits(event_group_, MAIN_EVENT_START_LISTENING);
 }
 

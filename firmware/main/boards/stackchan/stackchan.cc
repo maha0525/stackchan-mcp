@@ -2,7 +2,6 @@
 #include "cores3_audio_codec.h"
 #include "display/lcd_display.h"
 #include "application.h"
-#include "assets/lang_config.h"
 #include "config.h"
 #include "power_save_timer.h"
 #include "i2c_device.h"
@@ -2191,12 +2190,13 @@ private:
             }
             was_touched = true;
             touch_start_time = now_ms;
-            // タッチ瞬時のフィードバック (= state 遷移を待たない、 触れた瞬間に音)。
-            // 既存の HandleStateChangedEvent (listening 遷移) でも OGG_POPUP は
-            // 鳴る経路があるが、 タッチ -> connecting -> listening の遷移が
-            // 完了するまで音が出ず体感が悪い (実機では鳴ってないケースも有)。
-            // PollTouchpad から直接呼ぶ。
-            app.PlaySound(Lang::Sounds::OGG_POPUP);
+            // タッチ瞬時の PlaySound 直接呼び出しは行わない。 直後に
+            // StartListening → EnableVoiceProcessing(true) → ResetDecoder で
+            // playback queue がクリアされて音が消えるため。 代わりに
+            // Application::StartListening 側で play_popup_on_listening_ flag を
+            // 立てて、 HandleStateChangedEvent の Listening 分岐後半 (ResetDecoder
+            // の後) で OGG_POPUP を鳴らす経路に乗せる (= xiaozhi 標準の WakeWord
+            // 経路と同じ仕組み)。
             ESP_LOGI(TAG, "FT6336 press (num=%d state=%d)",
                      touch_point.num,
                      (int)app.GetDeviceState());
