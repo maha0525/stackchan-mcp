@@ -2302,8 +2302,11 @@ private:
             int64_t touch_duration = (esp_timer_get_time() / 1000) - touch_start_time;
             auto& app = Application::GetInstance();
             int state_at_release = (int)app.GetDeviceState();
-            ESP_LOGI(TAG, "FT6336 release (duration=%lldms state=%d)",
-                     touch_duration, state_at_release);
+            // %lld + 直後の文字列連結は ESP-IDF nano-printf で format ずれ
+            // (state 引数が想定外の値で表示される) を起こすので 32bit cast +
+            // %d に。 (memory feedback_esp_idf_nano_printf_no_zu.md 参照)
+            ESP_LOGI(TAG, "FT6336 release (duration=%d ms state=%d)",
+                     (int)touch_duration, state_at_release);
 
             // 只有短触才触发
             if (touch_duration < TOUCH_THRESHOLD_MS) {
@@ -2327,17 +2330,30 @@ private:
                     SetAllRgbLeds(0, 0, 0);
                     app.StopListening();
                 } else {
-                    ESP_LOGI(TAG, "FT6336 short tap -> ToggleChatState (state=%d)",
+                    // listening 開始は ToggleChatState ではなく StartListening
+                    // を使う。 ToggleChatState 経由は SetListeningMode に
+                    // GetDefaultListeningMode() (= AutoStop) を渡すため、
+                    // ペルソナ発話終了 (tts.stop) の Schedule 内で device が
+                    // 自動的に Listening 状態に再復帰してしまい (= xiaozhi の
+                    // 連続会話モデル、 application.cc:565)、 「タッチ駆動」 が
+                    // 破綻する (= 次のタッチが listen.stop 経路に入って即送信)。
+                    // StartListening 経由は HandleStartListeningEvent で
+                    // SetListeningMode(ManualStop) を強制するので、 tts.stop 後
+                    // は Idle に留まり、 次のタッチで明示的に listen 開始する
+                    // Vessel UX が成立する。 Idle 以外 (Speaking 等) でも
+                    // HandleStartListeningEvent が AbortSpeaking → ManualStop で
+                    // 適切に処理する。
+                    ESP_LOGI(TAG, "FT6336 short tap -> StartListening (state=%d)",
                              state_at_release);
                     // 録音開始想定のフィードバック (= 全 LED 緑点灯、 控えめ
-                    // な輝度)。 実際の listen 起動は ToggleChatState 経由で
+                    // な輝度)。 実際の listen 起動は StartListening 経由で
                     // 非同期処理。 タッチが取れたかどうかの体感を優先。
                     SetAllRgbLeds(0, 32, 0);
-                    app.ToggleChatState();
+                    app.StartListening();
                 }
             } else {
-                ESP_LOGI(TAG, "FT6336 long press ignored (duration=%lldms)",
-                         touch_duration);
+                ESP_LOGI(TAG, "FT6336 long press ignored (duration=%d ms)",
+                         (int)touch_duration);
             }
         }
     }
