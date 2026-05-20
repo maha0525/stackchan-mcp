@@ -2,6 +2,7 @@
 #include "cores3_audio_codec.h"
 #include "display/lcd_display.h"
 #include "application.h"
+#include "assets/lang_config.h"
 #include "config.h"
 #include "power_save_timer.h"
 #include "i2c_device.h"
@@ -2283,24 +2284,69 @@ private:
     void PollTouchpad() {
         static bool was_touched = false;
         static int64_t touch_start_time = 0;
-        const int64_t TOUCH_THRESHOLD_MS = 500;  // 触摸时长阈值，超过500ms视为长按
+        static int64_t last_release_ms = 0;       // デバウンス用 (= 直前 release 時刻)
+        static int64_t listening_started_ms = 0;  // タイムアウト用 (= listening 突入時刻)
+        static bool was_listening = false;        // listening 突入のエッジ検出
+        const int64_t TOUCH_THRESHOLD_MS = 500;   // 触摸时长阈值，超过500ms视为长按
+        const int64_t DEBOUNCE_MS = 300;          // 直前 release から N ms 以内の press は無視
+        const int64_t LISTEN_TIMEOUT_MS = 30000;  // listening 状態に N ms 以上滞在で auto stop
+
+        auto& app = Application::GetInstance();
+        int64_t now_ms = esp_timer_get_time() / 1000;
+
+        // --- listening 状態の上界 (タイムアウト) 管理 ---
+        // 状態遷移のエッジ検出で突入時刻を記録、 滞在時間が LISTEN_TIMEOUT_MS を
+        // 超えたら StopListening を自動発火する。 タッチ忘れ放置で listen が
+        // 無限持続するのを防ぐ。 StopListening 後は listening_started_ms を 0 に
+        // 戻して再発火を抑止 (次に listening 突入したら再セット)。
+        bool is_listening = (app.GetDeviceState() == kDeviceStateListening);
+        if (is_listening && !was_listening) {
+            listening_started_ms = now_ms;
+            ESP_LOGI(TAG, "Listening entered at %d ms (timeout in %d ms)",
+                     (int)now_ms, (int)LISTEN_TIMEOUT_MS);
+        }
+        was_listening = is_listening;
+        if (is_listening && listening_started_ms != 0 &&
+            (now_ms - listening_started_ms) > LISTEN_TIMEOUT_MS) {
+            ESP_LOGI(TAG, "Listening timeout reached (%d ms) -> StopListening",
+                     (int)(now_ms - listening_started_ms));
+            SetAllRgbLeds(0, 0, 0);
+            app.StopListening();
+            listening_started_ms = 0;
+        }
 
         ft6336_->UpdateTouchPoint();
         auto& touch_point = ft6336_->GetTouchPoint();
 
         // 检测触摸开始
         if (touch_point.num > 0 && !was_touched) {
+            // デバウンス: 直前 release から DEBOUNCE_MS 以内の press は無視。
+            // FT6336 のチャタリングや「タッチした直後にもう一度触れてしまう」
+            // 連打事故を防止。
+            if (last_release_ms != 0 && (now_ms - last_release_ms) < DEBOUNCE_MS) {
+                ESP_LOGI(TAG, "FT6336 press debounced (last release %d ms ago)",
+                         (int)(now_ms - last_release_ms));
+                // was_touched は更新しない。 次の poll でも press 判定を再評価
+                // するが、 デバウンス期間を超えれば通常 press として処理される。
+                return;
+            }
             was_touched = true;
-            touch_start_time = esp_timer_get_time() / 1000; // 转换为毫秒
+            touch_start_time = now_ms;
+            // タッチ瞬時のフィードバック (= state 遷移を待たない、 触れた瞬間に音)。
+            // 既存の HandleStateChangedEvent (listening 遷移) でも OGG_POPUP は
+            // 鳴る経路があるが、 タッチ -> connecting -> listening の遷移が
+            // 完了するまで音が出ず体感が悪い (実機では鳴ってないケースも有)。
+            // PollTouchpad から直接呼ぶ。
+            app.PlaySound(Lang::Sounds::OGG_POPUP);
             ESP_LOGI(TAG, "FT6336 press (num=%d state=%d)",
                      touch_point.num,
-                     (int)Application::GetInstance().GetDeviceState());
+                     (int)app.GetDeviceState());
         }
         // 检测触摸释放
         else if (touch_point.num == 0 && was_touched) {
             was_touched = false;
-            int64_t touch_duration = (esp_timer_get_time() / 1000) - touch_start_time;
-            auto& app = Application::GetInstance();
+            int64_t touch_duration = now_ms - touch_start_time;
+            last_release_ms = now_ms;
             int state_at_release = (int)app.GetDeviceState();
             // %lld + 直後の文字列連結は ESP-IDF nano-printf で format ずれ
             // (state 引数が想定外の値で表示される) を起こすので 32bit cast +
