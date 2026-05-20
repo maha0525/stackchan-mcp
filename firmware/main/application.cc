@@ -722,6 +722,7 @@ void Application::DismissAlert() {
 }
 
 void Application::ToggleChatState() {
+    ESP_LOGI(TAG, "ToggleChatState() requested (state=%d)", (int)GetDeviceState());
     xEventGroupSetBits(event_group_, MAIN_EVENT_TOGGLE_CHAT);
 }
 
@@ -730,10 +731,12 @@ void Application::StartListening() {
     // HandleStartListeningEvent (main task) so all writes to
     // play_popup_on_listening_ converge to the same task that reads
     // and clears it in HandleStateChangedEvent.
+    ESP_LOGI(TAG, "StartListening() requested (state=%d)", (int)GetDeviceState());
     xEventGroupSetBits(event_group_, MAIN_EVENT_START_LISTENING);
 }
 
 void Application::StopListening() {
+    ESP_LOGI(TAG, "StopListening() requested (state=%d)", (int)GetDeviceState());
     xEventGroupSetBits(event_group_, MAIN_EVENT_STOP_LISTENING);
 }
 
@@ -935,6 +938,7 @@ void Application::ContinueWakeWordInvoke(const std::string& wake_word) {
 
 void Application::HandleStateChangedEvent() {
     DeviceState new_state = state_machine_.GetState();
+    ESP_LOGI(TAG, "State changed -> %d", (int)new_state);
     clock_ticks_ = 0;
 
     auto& board = Board::GetInstance();
