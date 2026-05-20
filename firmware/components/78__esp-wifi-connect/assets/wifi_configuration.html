@@ -307,17 +307,6 @@
                     <small data-lang="websocket_token_hint" style="color: #666;">Optional. Sent as Authorization: Bearer header when set. The current value is never displayed. Leave blank to keep the existing token, type a new value to update it, or hit ❌ to fall back to the build-time CONFIG_DEFAULT_WEBSOCKET_TOKEN (this disables auth on stock builds where no Kconfig default is set, but reverts to that default on builds that ship one).</small>
                 </p>
 
-                <!-- WebSocket Persistent Connection (stackchan-mcp specific) -->
-                <p style="display: flex; align-items: center; gap: 10px;">
-                    <label for="websocket_persistent" style="margin: 0;">
-                        <span data-lang="websocket_persistent">Keep WebSocket connection open at all times</span>
-                    </label>
-                    <input type="checkbox" id="websocket_persistent" name="websocket_persistent">
-                </p>
-                <p style="margin-top: -8px;">
-                    <small data-lang="websocket_persistent_hint" style="color: #666;">Off (default): connect only when a voice session starts. On: connect at boot and reconnect on failure, so an external producer (SAIVerse / other server-driven audio path) can push audio at any time. Leave off unless you specifically need server-driven push.</small>
-                </p>
-
                 <!-- Max TX Power -->
                 <p style="display: flex; align-items: center; gap: 10px;">
                     <label for="max_tx_power" data-lang="max_tx_power" style="white-space: nowrap;">Wi-Fi Max TX Power:</label>
@@ -513,8 +502,6 @@
                 websocket_token: 'Gateway Token:',
                 websocket_token_hint: 'Optional. Sent as Authorization: Bearer header when set. The current value is never displayed. Leave blank to keep the existing token, type a new value to update it, or hit ❌ to fall back to the build-time CONFIG_DEFAULT_WEBSOCKET_TOKEN (this disables auth on stock builds where no Kconfig default is set, but reverts to that default on builds that ship one).',
                 websocket_token_placeholder_set: '••••• (token set; leave blank to keep, ❌ to fall back to build default)',
-                websocket_persistent: 'Keep WebSocket connection open at all times',
-                websocket_persistent_hint: 'Off (default): connect only when a voice session starts. On: connect at boot and reconnect on failure, so an external producer (SAIVerse / other server-driven audio path) can push audio at any time. Leave off unless you specifically need server-driven push.',
                 max_tx_power: 'Wi-Fi Max TX Power:',
                 remember_bssid: 'Remember BSSID when connecting to Wi-Fi',
                 sleep_mode: 'Enable Sleep Mode',
@@ -737,8 +724,6 @@
                 websocket_token: 'ゲートウェイトークン:',
                 websocket_token_hint: '任意。設定時はAuthorization: Bearerヘッダで送信されます。現在の値は表示されません。空のまま送信すると既存トークンが保持され、新しい値を入力すると更新、❌ ボタンで build-time の CONFIG_DEFAULT_WEBSOCKET_TOKEN に戻ります（Kconfig 既定値が未設定のビルドでは認証なしになり、既定値が設定されているビルドではその既定値に戻ります）。',
                 websocket_token_placeholder_set: '••••• (トークン設定済み: 空のまま送信で保持、❌ で組み込み既定値に戻す)',
-                websocket_persistent: 'WebSocket 接続を常時維持する',
-                websocket_persistent_hint: 'オフ (デフォルト): voice session 開始時のみ接続。オン: 起動時から接続を試行し、失敗時も再接続を続けるので、外部 producer (SAIVerse など server-driven audio 経路) からいつでも音声を push できる。server-driven push が要らないなら基本オフのままで良い。',
                 max_tx_power: 'Wi-Fi最大送信電力:',
                 remember_bssid: 'Wi-Fi接続時にBSSIDを記憶する',
                 sleep_mode: 'スリープモードを有効にする',
@@ -1404,7 +1389,6 @@
                 ota_url: document.getElementById('ota_url').value,
                 websocket_url: document.getElementById('websocket_url').value,
                 websocket_fallback_url: document.getElementById('websocket_fallback_url').value,
-                websocket_persistent: document.getElementById('websocket_persistent').checked,
                 max_tx_power: parseInt(document.getElementById('max_tx_power').value),
                 remember_bssid: document.getElementById('remember_bssid').checked,
                 sleep_mode: document.getElementById('sleep_mode').checked
@@ -1564,9 +1548,6 @@
                     tokenInput.placeholder = placeholder;
                 } else {
                     tokenInput.dataset.wasSet = 'false';
-                }
-                if (data.websocket_persistent !== undefined) {
-                    document.getElementById('websocket_persistent').checked = data.websocket_persistent;
                 }
                 if (data.max_tx_power) {
                     document.getElementById('max_tx_power').value = data.max_tx_power;

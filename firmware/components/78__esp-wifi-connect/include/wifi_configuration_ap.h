@@ -87,14 +87,6 @@ private:
     // field so it can be input via a password-style UI control without
     // exposing the value in the URL fields.
     std::string websocket_token_;
-    // Persistent-connection opt-in flag persisted to the same
-    // "websocket" NVS namespace (key "persistent", u8 0/1). When true,
-    // application.cc opens the audio channel at boot (instead of only
-    // when a voice session starts) and websocket_protocol.cc keeps
-    // retrying after an initial-connect failure. Default false to
-    // preserve the upstream "voice-session-driven, connect on demand"
-    // ergonomics for users who don't need server-pushed audio.
-    bool websocket_persistent_ = false;
     int8_t max_tx_power_;
     bool remember_bssid_;
     bool sleep_mode_;

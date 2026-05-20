@@ -281,16 +281,6 @@ void WifiConfigurationAp::StartAccessPoint()
             ESP_LOGI(TAG, "WebSocket token loaded from NVS (websocket.token)");
         }
 
-        // Persistent-connection opt-in. Stored as u8 (0/1) so it lives
-        // alongside the URL/token strings in the same namespace and the
-        // submit handler can write it through the same nvs_handle.
-        uint8_t persistent_u8 = 0;
-        if (nvs_get_u8(ws_nvs, "persistent", &persistent_u8) == ESP_OK) {
-            websocket_persistent_ = persistent_u8 != 0;
-            ESP_LOGI(TAG, "WebSocket persistent mode loaded from NVS (websocket.persistent=%d)",
-                     websocket_persistent_ ? 1 : 0);
-        }
-
         nvs_close(ws_nvs);
     }
 }
@@ -620,8 +610,6 @@ void WifiConfigurationAp::StartWebServer()
             // user must re-enter a new value to overwrite it.
             cJSON_AddBoolToObject(json, "websocket_token_set",
                                   !this_->websocket_token_.empty());
-            cJSON_AddBoolToObject(json, "websocket_persistent",
-                                  this_->websocket_persistent_);
             cJSON_AddNumberToObject(json, "max_tx_power", this_->max_tx_power_);
             cJSON_AddBoolToObject(json, "remember_bssid", this_->remember_bssid_);
             cJSON_AddBoolToObject(json, "sleep_mode", this_->sleep_mode_);
@@ -780,29 +768,6 @@ void WifiConfigurationAp::StartWebServer()
                            this_->websocket_fallback_url_);
             save_ws_string("token", "websocket_token", this_->websocket_token_);
 
-            // Persistent-connection flag. Saved as u8 in the same
-            // "websocket" namespace as the URL/token strings so the
-            // single commit at the bottom covers all four. Absent from
-            // the JSON body (= UI didn't include the field) leaves the
-            // current value untouched, which matches the treatment of
-            // the URL/token strings: a field that isn't sent is not
-            // overwritten.
-            cJSON *persistent_item = cJSON_GetObjectItem(json, "websocket_persistent");
-            if (cJSON_IsBool(persistent_item)) {
-                bool persistent_val = cJSON_IsTrue(persistent_item);
-                if (ensure_ws_nvs_open()) {
-                    this_->websocket_persistent_ = persistent_val;
-                    esp_err_t set_err = nvs_set_u8(ws_nvs, "persistent",
-                                                   persistent_val ? 1 : 0);
-                    if (set_err != ESP_OK) {
-                        ESP_LOGE(TAG, "Failed to save websocket.persistent: %d", set_err);
-                        ws_save_failed = true;
-                    } else {
-                        ws_dirty = true;
-                    }
-                }
-            }
-
             if (ws_nvs_opened && ws_dirty && !ws_save_failed) {
                 esp_err_t commit_err = nvs_commit(ws_nvs);
                 if (commit_err != ESP_OK) {
@@ -874,11 +839,10 @@ void WifiConfigurationAp::StartWebServer()
             // (only its presence is reported) so a serial monitor capture
             // does not leak the bearer secret.
             ESP_LOGI(TAG,
-                "Saved settings: ota_url=%s, websocket_url=%s, websocket_fallback_url=%s, websocket_token=%s, websocket_persistent=%d, max_tx_power=%d, remember_bssid=%d, sleep_mode=%d",
+                "Saved settings: ota_url=%s, websocket_url=%s, websocket_fallback_url=%s, websocket_token=%s, max_tx_power=%d, remember_bssid=%d, sleep_mode=%d",
                 this_->ota_url_.c_str(), this_->websocket_url_.c_str(),
                 this_->websocket_fallback_url_.c_str(),
                 this_->websocket_token_.empty() ? "(empty)" : "(set)",
-                this_->websocket_persistent_ ? 1 : 0,
                 this_->max_tx_power_, this_->remember_bssid_, this_->sleep_mode_);
             return ESP_OK;
         },
