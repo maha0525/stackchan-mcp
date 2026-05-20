@@ -2143,24 +2143,31 @@ private:
         static bool was_touched = false;
         static int64_t touch_start_time = 0;
         const int64_t TOUCH_THRESHOLD_MS = 500;  // 触摸时长阈值，超过500ms视为长按
-        
+
         ft6336_->UpdateTouchPoint();
         auto& touch_point = ft6336_->GetTouchPoint();
-        
+
         // 检测触摸开始
         if (touch_point.num > 0 && !was_touched) {
             was_touched = true;
             touch_start_time = esp_timer_get_time() / 1000; // 转换为毫秒
-        } 
+            ESP_LOGI(TAG, "FT6336 press (num=%d state=%d)",
+                     touch_point.num,
+                     (int)Application::GetInstance().GetDeviceState());
+        }
         // 检测触摸释放
         else if (touch_point.num == 0 && was_touched) {
             was_touched = false;
             int64_t touch_duration = (esp_timer_get_time() / 1000) - touch_start_time;
-            
+            auto& app = Application::GetInstance();
+            int state_at_release = (int)app.GetDeviceState();
+            ESP_LOGI(TAG, "FT6336 release (duration=%lldms state=%d)",
+                     touch_duration, state_at_release);
+
             // 只有短触才触发
             if (touch_duration < TOUCH_THRESHOLD_MS) {
-                auto& app = Application::GetInstance();
                 if (app.GetDeviceState() == kDeviceStateStarting) {
+                    ESP_LOGI(TAG, "FT6336 short tap -> EnterWifiConfigMode");
                     EnterWifiConfigMode();
                     return;
                 }
@@ -2173,10 +2180,23 @@ private:
                 // 外部 hook へ POST できる。Vessel UX として「タッチで listen
                 // 開始 → 発話 → タッチで送信」を成立させるための fork 専用分岐。
                 if (app.GetDeviceState() == kDeviceStateListening) {
+                    ESP_LOGI(TAG, "FT6336 short tap -> StopListening (Phase 3' flush)");
+                    // 録音終了のフィードバック (= 全 LED 消灯)。 デバッグ目的、
+                    // MCP self.led.set_* 経由で上書き可能。
+                    SetAllRgbLeds(0, 0, 0);
                     app.StopListening();
                 } else {
+                    ESP_LOGI(TAG, "FT6336 short tap -> ToggleChatState (state=%d)",
+                             state_at_release);
+                    // 録音開始想定のフィードバック (= 全 LED 緑点灯、 控えめ
+                    // な輝度)。 実際の listen 起動は ToggleChatState 経由で
+                    // 非同期処理。 タッチが取れたかどうかの体感を優先。
+                    SetAllRgbLeds(0, 32, 0);
                     app.ToggleChatState();
                 }
+            } else {
+                ESP_LOGI(TAG, "FT6336 long press ignored (duration=%lldms)",
+                         touch_duration);
             }
         }
     }
@@ -2415,6 +2435,26 @@ private:
         uint16_t v = (uint16_t)(((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3));
         out[0] = (uint8_t)(v & 0xFF);
         out[1] = (uint8_t)((v >> 8) & 0xFF);
+    }
+
+    // 全 RGB LED を同じ色にする helper。 self.led.set_all MCP tool と同じ I2C 経路
+    // (PY32 経由 WS2812)。 PollTouchpad のタッチフィードバック等、 MCP 以外の
+    // 経路から LED を駆動するときに使う。 PY32 init 失敗時 (rgb_ok_ == false)
+    // は no-op で安全に抜ける。
+    void SetAllRgbLeds(uint8_t r, uint8_t g, uint8_t b) {
+        if (!rgb_ok_ || io_expander_ == nullptr) {
+            return;
+        }
+        uint8_t buf[RGB_LED_COUNT * 2];
+        uint8_t pair[2];
+        PackRgb565(r, g, b, pair);
+        for (int i = 0; i < RGB_LED_COUNT; i++) {
+            buf[i * 2 + 0] = pair[0];
+            buf[i * 2 + 1] = pair[1];
+        }
+        if (io_expander_->SetLedData(buf, sizeof(buf))) {
+            io_expander_->RefreshLeds();
+        }
     }
 
     void InitializeServo() {
