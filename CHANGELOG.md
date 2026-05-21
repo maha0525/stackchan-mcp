@@ -30,6 +30,98 @@ documented-only.
 
 ## [Unreleased]
 
+### Firmware
+
+- Fixed: the Si12T head-touch driver's TAP / STROKE log line printed
+  `duration=lums raw=0xNNNN` instead of human-readable values, because
+  ESP-IDF's nano-printf cannot parse the `%llums` specifier and the
+  failed parse stops `va_arg` from advancing past `duration_ms` — so
+  the following `%02X` consumed the long-long's bytes rather than the
+  Si12T Output1 register. `zones=000 raw=0x00` was also misleading
+  because the snapshot fields were overwritten every poll tick and
+  read the post-release zero state by the time the falling-edge
+  handler logged. The log line now uses `%u ms`, captures the
+  rising-edge sensor state separately into `press_start_*`, and reports
+  it as
+  `start_zones=NNN start_raw=0xNN ch=CCCC release_raw=0xNN duration=NN ms`,
+  with `ch=CCCC` decoding Output1's four 2-bit channel levels as
+  `0/L/M/H` (CH4 should always be `0`; a non-`0` CH4 character flags
+  wiring noise / EMI). `HandleTap` also receives the duration so the
+  400-600 ms grey-zone TAPs print their timing. Purely a logging
+  change — touch detection logic and timing constants are unchanged.
+  Contributed via
+  [PR #206](https://github.com/kisaragi-mochi/stackchan-mcp/pull/206).
+
+- Fixed: WebSocket candidate fallback is now fail-fast when a server
+  hello is malformed (missing/non-string `transport`, missing/empty
+  `session_id`, or unsupported `transport`). A new
+  `WEBSOCKET_PROTOCOL_SERVER_HELLO_FAILED` event bit is set by
+  `ParseServerHello()` on each rejection path, and
+  `OpenAudioChannelInternal()` now distinguishes the three outcomes
+  (success, rejection, full timeout). Rejected candidates fall back
+  to the next URL within ~100 ms instead of waiting out the full
+  10 s server-hello timeout. Happy path and no-hello timeout path
+  are byte-for-byte unchanged. Contributed via
+  [PR #205](https://github.com/kisaragi-mochi/stackchan-mcp/pull/205).
+
+- Added: generic Grove Port A I2C bus and four `self.i2c.*` MCP tools
+  (`scan` / `read` / `write` / `write_read`) so attached M5Stack Unit
+  modules (ENV III, ToF, gas sensor, PaHub, etc.) can be driven from
+  the gateway without recompiling firmware per Unit. Port A runs on
+  I2C controller 0, physically independent from the controller-1
+  internal bus (PMIC, AW9523, touch, audio codec, IMU), so the generic
+  tools cannot accidentally reach safety-critical ICs. `addr` is
+  constrained to 0x08..0x77 (I2C reserved ranges excluded), and
+  `bytes` / `write_bytes` payloads are capped at 256 items (matching
+  the `n_bytes` read cap). Contributed via
+  [PR #196](https://github.com/kisaragi-mochi/stackchan-mcp/pull/196).
+
+- Added: `kPropertyTypeArray` for MCP tool parameters, supporting
+  integer arrays (with optional per-element range) and string arrays.
+  An optional `set_max_items` setter caps the array length in the
+  emitted JSON Schema (`maxItems`) and rejects oversized arrays in
+  `set_value()` validation before they reach the tool callback. (The
+  parse-time `std::vector::reserve(array_size)` in `DoToolCall` still
+  runs before the cap is checked, so the cap acts as a
+  payload-acceptance guard rather than a pre-allocation guard;
+  tightening to a pre-allocation guard is tracked separately.) The
+  generic default-value constructor explicitly rejects
+  `kPropertyTypeArray` so future array tools must use the
+  element-type-aware constructor. Contributed via
+  [PR #195](https://github.com/kisaragi-mochi/stackchan-mcp/pull/195).
+
+- Fixed: WiFi association now retries with a brief delay and cancels
+  the in-flight `esp_wifi_connect()` on attempt timeout (via
+  `esp_wifi_disconnect()` on the `bits == 0` path), so access points
+  that respond slowly or drop the first 802.11 Association Comeback
+  frame no longer cause the device to fail WiFi at boot. The retry
+  log message also distinguishes timeout vs. driver-reported failure
+  to ease real slow-AP debugging. Contributed via
+  [PR #186](https://github.com/kisaragi-mochi/stackchan-mcp/pull/186).
+
+### Gateway
+
+- Added: MCP tool surface for the firmware-side Grove Port A generic
+  I2C bus introduced in
+  [PR #196](https://github.com/kisaragi-mochi/stackchan-mcp/pull/196) —
+  `i2c_scan` (discover attached Units), `i2c_read` (raw read at a 7-bit
+  address), `i2c_write` (raw write), and `i2c_write_read`
+  (Repeated-Start write-then-read for the register-pointer idiom).
+  Exposes the firmware tools so LLM clients can drive attached
+  M5Stack Unit modules from the gateway side.
+
+- Fixed: MCP tool schemas for `i2c_read` / `i2c_write` / `i2c_write_read`
+  now constrain the `addr` parameter to the I2C 7-bit address range
+  `0x08..0x77`, matching the `i2c_scan` probe range and the firmware-side
+  `Property` range introduced in
+  [PR #196](https://github.com/kisaragi-mochi/stackchan-mcp/pull/196).
+  The previous JSON Schema advertised `0..127`, which let LLM callers
+  attempt reserved-range addresses (0x00 General Call, 0x78–0x7F
+  reserved); the firmware tool property still rejected these at the
+  request-handling layer, so this closes a tool-surface inconsistency
+  rather than a functional gap. Tool descriptions now state the
+  constraint explicitly.
+
 ## [firmware-v1.8.0] - 2026-05-20
 
 ### Firmware
