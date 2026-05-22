@@ -432,19 +432,40 @@ public:
     Si12T(i2c_master_bus_handle_t i2c_bus, uint8_t addr = DEFAULT_ADDR)
         : I2cDevice(i2c_bus, addr) {}
 
-    // Probe the chip and bring it out of sleep. Returns true on success.
+    // Probe the chip and bring it into the same configured state used by
+    // M5Stack's official StackChan firmware
+    // (https://github.com/m5stack/StackChan, firmware/main/hal/drivers/Si12T).
+    // The official driver writes an explicit init sequence: SRST kick on
+    // CTRL2, CTRL1 config byte, low-sensitivity SEN register fill, and
+    // 0x00 to REF_RST / CH_HOLD / CAL_HOLD to enable per-channel
+    // calibration and sensing. Mirroring that sequence here resolves
+    // the long-running Ch1 false STROKE problem we observed when running
+    // with chip defaults — the default sensitivity (0xBB = HIGH LEVEL_3)
+    // was too high for the stack-chan head's antenna routing and led to
+    // baseline drift surfacing as sustained L/M-level pseudo-touches.
+    //
+    // NOTE: the official driver's polarity for REF_RST / CH_HOLD /
+    // CAL_HOLD is "0 = enable" — opposite to the way the Si12T
+    // datasheet text reads. Trust the official driver (which is
+    // matched by observed silicon behaviour) over the datasheet here.
+    // See docs/issues/stackchan_touch_false_stroke_events.md.
     bool Begin() {
-        uint8_t ctrl = 0;
-        if (!SafeReadReg(REG_CTRL, &ctrl)) {
+        // 1. Software reset + sleep, then wake. Mirrors the official
+        //    si12t_set_ctrl2(): write 0x0F (SRST=1, sleep=1) followed
+        //    by 0x07 (SRST=0, sleep=0). Without the SRST kick the
+        //    chip retains the previous session's register state
+        //    across ESP32 reset (Si12T stays powered through the
+        //    AXP2101 / battery rail).
+        if (!SafeWriteReg(REG_CTRL2, 0x0F)) {
+            ESP_LOGW("Si12T", "CTRL2 SRST kick write failed");
             return false;
         }
-        // CTRL bit1 = SLEEP. Clear it; bit1:0 must hold 1 per datasheet
-        // ("CTRL Bit1, Bit0 = 1 1" reset value), so write 0b00000011.
-        if (!SafeWriteReg(REG_CTRL, 0x03)) {
+        if (!SafeWriteReg(REG_CTRL2, 0x07)) {
+            ESP_LOGW("Si12T", "CTRL2 wake write failed");
             return false;
         }
-        // Verify the device actually responds on the output register.
-        // 0xFF would indicate an open bus / no device.
+        // 2. Verify chip is alive. Output1 == 0xFF would indicate
+        //    open bus / no device.
         uint8_t out1 = 0;
         if (!SafeReadReg(REG_OUTPUT1, &out1)) {
             return false;
@@ -453,7 +474,40 @@ public:
             ESP_LOGW("Si12T", "Output1 read 0xFF (likely no device)");
             return false;
         }
-        ESP_LOGI("Si12T", "init OK: ctrl=0x%02X out1=0x%02X (sleep cleared)", ctrl, out1);
+        // 3. CTRL1: Auto Mode, FTC=01 (10s), Interrupt(Middle, High),
+        //    Response cycle 4 (= RTC[2:0]=010+2). Value from official.
+        if (!SafeWriteReg(REG_CTRL1, 0x22)) {
+            ESP_LOGW("Si12T", "CTRL1 config write failed");
+        }
+        // 4. Sensitivity: TYPE_LOW LEVEL_3 = 0x33 on all SEN1..SEN6.
+        //    Chip default is 0xBB (TYPE_HIGH LEVEL_3) which proved
+        //    too sensitive for this PCB layout — false strokes from
+        //    Ch1 baseline drift were the dominant failure mode at
+        //    that sensitivity.
+        for (uint8_t reg = REG_SEN1; reg <= REG_SEN6; ++reg) {
+            if (!SafeWriteReg(reg, 0x33)) {
+                ESP_LOGW("Si12T", "SEN reg 0x%02X write failed", reg);
+            }
+        }
+        // 5. REF_RST / CH_HOLD / CAL_HOLD: 0x00 = enable per-channel
+        //    calibration + sensing on every channel. (Polarity per
+        //    official driver — see class header comment above.)
+        SafeWriteReg(REG_REF_RST1,  0x00);
+        SafeWriteReg(REG_REF_RST2,  0x00);
+        SafeWriteReg(REG_CH_HOLD1,  0x00);
+        SafeWriteReg(REG_CH_HOLD2,  0x00);
+        SafeWriteReg(REG_CAL_HOLD1, 0x00);
+        SafeWriteReg(REG_CAL_HOLD2, 0x00);
+        // 6. Read back a few registers for the log. Useful when
+        //    diagnosing whether the chip kept the values we wrote.
+        uint8_t ctrl2 = 0xEE, ctrl1 = 0xEE, sen1 = 0xEE, ref1 = 0xEE;
+        SafeReadReg(REG_CTRL2, &ctrl2);
+        SafeReadReg(REG_CTRL1, &ctrl1);
+        SafeReadReg(REG_SEN1,  &sen1);
+        SafeReadReg(REG_REF_RST1, &ref1);
+        ESP_LOGI("Si12T",
+                 "init OK: out1=0x%02X ctrl2=0x%02X ctrl1=0x%02X sen1=0x%02X ref1=0x%02X",
+                 out1, ctrl2, ctrl1, sen1, ref1);
         return true;
     }
 
@@ -474,8 +528,25 @@ public:
     }
 
 private:
-    static constexpr uint8_t REG_CTRL    = 0x09;  // CTRL, SLEEP bit etc.
-    static constexpr uint8_t REG_OUTPUT1 = 0x10;  // CH1..CH4 packed (2bpp)
+    // Register addresses. Names match M5Stack's official Si12T driver
+    // (CTRL1 = 0x08 = "CFIG" in datasheet, CTRL2 = 0x09 = "CTRL" in
+    // datasheet — the datasheet labels are inconsistent with how
+    // working firmware refers to these).
+    static constexpr uint8_t REG_SEN1     = 0x02;  // sensitivity Ch1/Ch2
+    static constexpr uint8_t REG_SEN2     = 0x03;  // sensitivity Ch3/Ch4
+    static constexpr uint8_t REG_SEN3     = 0x04;  // sensitivity Ch5/Ch6
+    static constexpr uint8_t REG_SEN4     = 0x05;  // sensitivity Ch7/Ch8
+    static constexpr uint8_t REG_SEN5     = 0x06;  // sensitivity Ch9/Ch10
+    static constexpr uint8_t REG_SEN6     = 0x07;  // sensitivity Ch11/Ch12
+    static constexpr uint8_t REG_CTRL1    = 0x08;  // general config (FTC, ILC, etc.)
+    static constexpr uint8_t REG_CTRL2    = 0x09;  // SRST + SLEEP bits
+    static constexpr uint8_t REG_REF_RST1 = 0x0A;  // reference reset / per-ch enable
+    static constexpr uint8_t REG_REF_RST2 = 0x0B;
+    static constexpr uint8_t REG_CH_HOLD1 = 0x0C;  // channel hold / enable
+    static constexpr uint8_t REG_CH_HOLD2 = 0x0D;
+    static constexpr uint8_t REG_CAL_HOLD1= 0x0E;  // calibration hold / enable
+    static constexpr uint8_t REG_CAL_HOLD2= 0x0F;
+    static constexpr uint8_t REG_OUTPUT1  = 0x10;  // CH1..CH4 packed (2bpp)
 
     bool SafeReadReg(uint8_t reg, uint8_t* out) {
         esp_err_t err = i2c_master_transmit_receive(i2c_device_, &reg, 1, out, 1, 100);
@@ -652,12 +723,17 @@ private:
     };
     static constexpr int TOUCH_POLL_MS    = 100;  // 100 Hz polling
     static constexpr int TAP_MAX_MS       = 400;
-    static constexpr int STROKE_MIN_MS    = 400;  // was 600; lowered because
-                                                  // finger-glide between zones
-                                                  // and Si12T auto-recalibration
-                                                  // inject brief "all-false"
-                                                  // gaps that cut a real stroke
-                                                  // short of 600 ms.
+    static constexpr int STROKE_MIN_MS    = 800;  // was 400; raised after
+                                                  // switching Si12T sensitivity
+                                                  // to LOW LEVEL_3 (0x33) per
+                                                  // M5Stack's official driver.
+                                                  // Lower sensitivity delays
+                                                  // chip-side touch detection,
+                                                  // pushing real "pon" taps
+                                                  // into the 400-700 ms range.
+                                                  // 800 ms keeps those as TAP
+                                                  // while still letting real
+                                                  // strokes through.
     static constexpr int REACTION_HOLD_MS = 3000;
     static constexpr int COOLDOWN_MS      = 800;  // post-reaction noise gate
     // With 2-sample debounce this gives ~200 ms confirm latency, fast enough
@@ -3747,10 +3823,34 @@ private:
                 // We were in cooldown when pressed — drop the release event too.
                 return;
             }
-            if (duration_ms >= STROKE_MIN_MS) {
+            // Suppress L-only events. With Si12T sensitivity set to LOW
+            // LEVEL_3 (= 0x33), real touches reliably reach M or H on at
+            // least one channel; an event whose press-start raw shows
+            // only L levels is almost certainly capacitive noise (we
+            // continued to see ~1 such event per hour even after the
+            // public driver-equivalent init reduced their duration to
+            // sub-second). The cost — silently dropping an extremely
+            // soft, M/H-undeshold real touch — is acceptable given the
+            // UX cost of spurious head-pat reactions.
+            bool press_has_mh = false;
+            for (int ch = 0; ch < 4; ++ch) {
+                uint8_t lv = (press_start_output1_raw_ >> (ch * 2)) & 0x3;
+                if (lv >= 0x2) {  // M (10) or H (11)
+                    press_has_mh = true;
+                    break;
+                }
+            }
+            if (!press_has_mh && press_start_output1_raw_ != 0) {
+                ESP_LOGI(TAG,
+                         "touch event: SUPPRESSED (L-only, likely noise) "
+                         "start_zones=%d%d%d start_raw=0x%02X duration=%u ms",
+                         press_start_zones_[0], press_start_zones_[1],
+                         press_start_zones_[2], press_start_output1_raw_,
+                         (unsigned)duration_ms);
+            } else if (duration_ms >= STROKE_MIN_MS) {
                 HandleStroke(duration_ms);
             } else {
-                // Treat the 400-600 ms grey zone as TAP.
+                // Treat the < STROKE_MIN_MS hold as TAP.
                 HandleTap(duration_ms);
             }
             cooldown_until_us_ = now_us + (uint64_t)COOLDOWN_MS * 1000ULL;
