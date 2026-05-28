@@ -319,10 +319,14 @@ documented-only.
   configured URL. Default-OFF and opt-in: with the env var unset,
   inbound device-driven listen frames are still logged at debug and
   discarded as before. Coexists with MCP-driven `listen()` by sharing
-  the same single recording slot — if `listen()` is already
-  capturing, the device-driven branch defers. Pure-Python RFC 7845 /
-  RFC 3533 Ogg packing, no new runtime dependencies. Contributed via
-  [PR #TBD-F](https://github.com/kisaragi-mochi/stackchan-mcp/pull/TBD-F).
+  the same single recording slot — the two sources defer to each
+  other rather than clobber: a device-driven listen.start arriving
+  while `listen()` is capturing is ignored with a warning log, and
+  conversely an MCP `listen()` invoked while a device-driven capture
+  is buffering is declined with an explicit error. Pure-Python
+  RFC 7845 / RFC 3533 Ogg packing, no new runtime dependencies.
+  Contributed via
+  [PR #209](https://github.com/kisaragi-mochi/stackchan-mcp/pull/209).
 
 - Added: MCP tool surface for the firmware-side Grove Port A generic
   I2C bus introduced in
