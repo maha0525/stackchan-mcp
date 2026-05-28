@@ -251,7 +251,7 @@ documented-only.
   concurrency lock as the buffered variant. Lets producers start
   playback before the full audio is synthesised (HTTP streaming
   upload, real-time TTS engines, etc.). Contributed via
-  [PR #TBD-A2](https://github.com/kisaragi-mochi/stackchan-mcp/pull/TBD-A2).
+  [PR #213](https://github.com/kisaragi-mochi/stackchan-mcp/pull/213).
 
 - Added: `send_pcm_audio(gateway, pcm, source_rate=...)` helper
   extracted from `synthesize_and_send`'s encode-and-push back-half.
