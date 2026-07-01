@@ -438,6 +438,14 @@ def _run_ownership_check() -> int:
     """Print the current ownership lock status and exit cleanly."""
     from .ownership import is_pid_alive, read_lock
 
+    # Load ``.env`` first so that a WS_PORT / PORT defined only there resolves
+    # the same per-port lock the running gateway claims. Startup loads ``.env``
+    # before ``_acquire_startup_lock`` (via ``_run_stdio_gateway`` /
+    # ``_run_streamable_http_placeholder``), so ``--check`` must match it —
+    # otherwise a gateway owning ``owner-18765.lock`` would be inspected against
+    # the default ``owner-8765.lock`` and wrongly reported ready. Mirrors how
+    # ``--preflight`` loads ``.env`` inside ``_run_preflight``.
+    _load_dotenv()
     # Inspect the per-WS_PORT lock this gateway would claim (not the legacy
     # machine-global owner.lock), so the preflight reflects the actual port.
     lock_path = _ws_port_lock_path()
