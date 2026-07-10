@@ -30,6 +30,18 @@ documented-only.
 
 ## [Unreleased]
 
+### Gateway
+
+- Added `read_imu`, a parameterless MCP wrapper for one on-board BMI270 +
+  BMM150 9-axis snapshot with physical units, raw samples, and data-ready
+  metadata.
+
+### Firmware
+
+- Added the read-only `self.imu.read` tool for the StackChan board. It reads
+  the internal BMI270 accelerometer/gyroscope and the BMM150 connected through
+  BMI270 AUX without exposing the safety-critical internal I2C bus.
+
 ## [0.17.0] - 2026-07-12
 
 ### Gateway
