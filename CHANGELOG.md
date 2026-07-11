@@ -38,9 +38,9 @@ documented-only.
 - Added `read_environment`, a parameterless MCP wrapper for one on-board
   LTR-553ALS-WA ambient-light/proximity snapshot with ADC counts and status
   flags.
-- Added `scan_nfc`, a parameterless MCP wrapper for a single ISO 14443A NFC
-  tag UID scan using StackChan's body-mounted ST25R3916 reader. It performs no
-  tag memory read/write, authentication, or emulation.
+- Added `scan_nfc`, a parameterless MCP wrapper for a single ISO 14443A UID
+  or NFC-F (FeliCa) IDm/PMm scan using StackChan's body-mounted ST25R3916
+  reader. It performs no tag memory read/write, authentication, or emulation.
 
 ### Firmware
 
@@ -51,8 +51,8 @@ documented-only.
   reads LTR-553ALS-WA ambient-light and proximity ADC values without exposing
   the safety-critical internal I2C bus.
 - Added the `self.nfc.scan` tool for the StackChan board. It turns on the
-  ST25R3916 RF field only during a single ISO 14443A UID scan, then turns it
-  off without reading or writing tag memory.
+  ST25R3916 RF field only during a single ISO 14443A UID or NFC-F IDm/PMm
+  scan, then turns it off without reading or writing tag memory.
 
 ## [0.17.0] - 2026-07-12
 
