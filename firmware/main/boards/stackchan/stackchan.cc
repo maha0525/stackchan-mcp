@@ -68,16 +68,25 @@ class Pmic : public Axp2101 {
 public:
     // Power Init
     Pmic(i2c_master_bus_handle_t i2c_bus, uint8_t addr) : Axp2101(i2c_bus, addr) {
-        uint8_t data = ReadReg(0x90);
-        data |= 0b10110100;
-        WriteReg(0x90, data);
-        WriteReg(0x99, (0b11110 - 5));
-        WriteReg(0x97, (0b11110 - 2));
-        WriteReg(0x69, 0b00110101);
-        WriteReg(0x30, 0b111111);
+        // Match M5Unified's CoreS3/StackChan AXP2101 power setup.  The
+        // previous board-local sequence enabled ALDO3/4 but left ALDO1/2 and
+        // the PMU common/ADC configuration at unrelated values.  That still
+        // let the I2C devices acknowledge, but the BMI270 configuration
+        // engine never reached INTERNAL_STATUS=0x01.
         WriteReg(0x90, 0xBF);
+        WriteReg(0x92, 18 - 5);  // ALDO1: 1.8 V (AW88298)
+        WriteReg(0x93, 33 - 5);  // ALDO2: 3.3 V (ES7210)
         WriteReg(0x94, 33 - 5);
         WriteReg(0x95, 33 - 5);
+        WriteReg(0x27, 0x00);    // Power-key hold timings
+        WriteReg(0x69, 0x11);    // CHGLED setting
+        WriteReg(0x10, 0x30);    // PMU common configuration
+        WriteReg(0x30, 0x0F);    // ADC enabled
+
+        // StackChan's LCD backlight uses these PWM registers in addition to
+        // the common CoreS3 power rails above.
+        WriteReg(0x99, (0b11110 - 5));
+        WriteReg(0x97, (0b11110 - 2));
     }
 
     void SetBrightness(uint8_t brightness) {
@@ -148,7 +157,19 @@ public:
     }
 
     void UpdateTouchPoint() {
-        ReadRegs(0x02, read_buffer_, 6);
+        uint8_t reg = 0x02;
+        esp_err_t err = i2c_master_transmit_receive(i2c_device_, &reg, 1,
+                                                    read_buffer_, 6, 100);
+        if (err != ESP_OK) {
+            // Long internal-bus transactions (notably the BMI270 firmware
+            // upload) can legitimately make a touch sample miss its 100 ms
+            // deadline. Do not abort the whole board from this best-effort
+            // polling task; report no touch for this sample and let the next
+            // tick retry after the I2C driver has recovered.
+            tp_ = TouchPoint_t{};
+            ESP_LOGW(TAG, "FT6336 touch read skipped: %s", esp_err_to_name(err));
+            return;
+        }
         tp_.num = read_buffer_[0] & 0x0F;
         tp_.x = ((read_buffer_[1] & 0x0F) << 8) | read_buffer_[2];
         tp_.y = ((read_buffer_[3] & 0x0F) << 8) | read_buffer_[4];
@@ -7335,27 +7356,23 @@ public:
         InitializePortAI2c();
         InitializeAxp2101();
         InitializeAw9523();
-        // I2cDetect() moved AFTER all I2C device initializations.
-        // The 128-address probe (i2c_master_probe over the whole bus) was
-        // leaving PY32 (0x6F) in a half-finished slave state, so the
-        // following transmit_receive (REG_VERSION via Repeated Start)
-        // timed out (0x103). Doing the scan after IOExpander/Si12T init
-        // preserves the boot-log debug info without poisoning subsequent
-        // register reads. Si12T (0x68) is unaffected on the same bus,
-        // but moving the scan is safer for any future I2C peripheral too.
         InitializeSpi();
         InitializeIli9342Display();
         InitializeCamera();
-        InitializeFt6336TouchPad();
         GetBacklight()->RestoreBrightness();
         InitializeIOExpander();
         InitializeServo();
         InitializeTouchSettings();
-        InitializeSi12tTouch();
-        I2cDetect();
+        // Start the internal-bus sensor setup before the periodic touch tasks.
+        // BMI270's 8 KiB firmware upload occupies the bus long enough for a
+        // concurrent FT6336 poll to hit its 100 ms timeout and abort via the
+        // common I2cDevice helper. The external Port A scan remains available
+        // through the self.i2c.scan tool.
         InitializeImu();
         InitializeEnvironment();
         InitializeNfc();
+        InitializeFt6336TouchPad();
+        InitializeSi12tTouch();
         // Avatar auto-display disabled: WiFi config UI needs to be visible.
         // Avatar is shown on-demand via MCP set_avatar command.
         // InitializeAvatar();
