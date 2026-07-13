@@ -28,6 +28,7 @@ constexpr uint8_t kBmm150ChipId = 0x32;
 constexpr uint8_t kRegChipId = 0x00;
 constexpr uint8_t kRegStatus = 0x03;
 constexpr uint8_t kRegAuxData = 0x04;
+constexpr uint8_t kRegIntStatus1 = 0x1D;
 constexpr uint8_t kRegInternalStatus = 0x21;
 constexpr uint8_t kRegAuxDevId = 0x4B;
 constexpr uint8_t kRegAuxIfConf = 0x4C;
@@ -425,13 +426,13 @@ esp_err_t StackChanImu::Read(StackChanImuSnapshot* snapshot) {
     }
 
     // A freshly powered BMI270 can acknowledge register reads before its
-    // first accelerometer/gyro frame exists. Poll STATUS rather than
+    // first accelerometer/gyro frame exists. Poll INT_STATUS_1 rather than
     // returning that all-zero shadow frame to the first caller.
     uint8_t ready_status = 0;
     for (int attempt = 0; attempt < 100; ++attempt) {
-        err = ReadRegisters(kRegStatus, &ready_status, 1);
+        err = ReadRegisters(kRegIntStatus1, &ready_status, 1);
         if (err != ESP_OK) {
-            Fail("IMU status read failed", err);
+            Fail("IMU data-ready status read failed", err);
             xSemaphoreGive(mutex_);
             return err;
         }
@@ -439,6 +440,11 @@ esp_err_t StackChanImu::Read(StackChanImuSnapshot* snapshot) {
             break;
         }
         vTaskDelay(pdMS_TO_TICKS(1));
+    }
+    if ((ready_status & 0xC0) != 0xC0) {
+        err = Fail("IMU sample not ready", ESP_ERR_TIMEOUT);
+        xSemaphoreGive(mutex_);
+        return err;
     }
 
     uint8_t data[20] = {};
@@ -475,7 +481,6 @@ esp_err_t StackChanImu::Read(StackChanImuSnapshot* snapshot) {
                      -result.mag_raw.y * kMagScale,
                      -result.mag_raw.z * kMagScale};
     result.mag_available = mag_available_;
-    result.mag_data_ready = mag_available_ && ((data[6] & 0x01) != 0);
     result.accel_data_ready = (ready_status & 0x80) != 0;
     result.gyro_data_ready = (ready_status & 0x40) != 0;
     result.mag_data_ready = mag_available_ && ((ready_status & 0x20) != 0);

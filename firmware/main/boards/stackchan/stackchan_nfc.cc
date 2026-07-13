@@ -35,6 +35,7 @@ constexpr uint8_t kRegNoResponseTimer1 = 0x10;
 constexpr uint8_t kRegTimerAndEmvControl = 0x12;
 constexpr uint8_t kRegMaskMainInterrupt = 0x16;
 constexpr uint8_t kRegMainInterrupt = 0x1A;
+constexpr uint8_t kRegTimerAndNfcInterrupt = 0x1B;
 constexpr uint8_t kRegErrorAndWakeupInterrupt = 0x1C;
 constexpr uint8_t kRegPassiveTargetInterrupt = 0x1D;
 constexpr uint8_t kRegFifoStatus1 = 0x1E;
@@ -199,6 +200,7 @@ esp_err_t StackChanNfc::ClearInterrupts() {
     uint8_t discard = 0;
     esp_err_t err = ReadRegister(kRegErrorAndWakeupInterrupt, &discard);
     if (err == ESP_OK) err = ReadRegister(kRegMainInterrupt, &discard);
+    if (err == ESP_OK) err = ReadRegister(kRegTimerAndNfcInterrupt, &discard);
     if (err == ESP_OK) err = ReadRegister(kRegPassiveTargetInterrupt, &discard);
     return err;
 }
