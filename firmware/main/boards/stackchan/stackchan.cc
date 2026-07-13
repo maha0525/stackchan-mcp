@@ -167,8 +167,15 @@ public:
             // polling task; report no touch for this sample and let the next
             // tick retry after the I2C driver has recovered.
             tp_ = TouchPoint_t{};
-            ESP_LOGW(TAG, "FT6336 touch read skipped: %s", esp_err_to_name(err));
+            if (!read_failed_) {
+                ESP_LOGW(TAG, "FT6336 touch reads unavailable: %s", esp_err_to_name(err));
+                read_failed_ = true;
+            }
             return;
+        }
+        if (read_failed_) {
+            ESP_LOGI(TAG, "FT6336 touch reads recovered");
+            read_failed_ = false;
         }
         tp_.num = read_buffer_[0] & 0x0F;
         tp_.x = ((read_buffer_[1] & 0x0F) << 8) | read_buffer_[2];
@@ -181,6 +188,7 @@ public:
 
 private:
     uint8_t* read_buffer_ = nullptr;
+    bool read_failed_ = false;
     TouchPoint_t tp_;
 };
 
